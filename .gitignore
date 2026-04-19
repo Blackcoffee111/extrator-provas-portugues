@@ -1,0 +1,21 @@
+.env
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+workspace/
+provas fontes/
+.venv-mineru/
+.venv/
+.claude/*
+!.claude/skills
+src/exames_pipeline/pdf_parser 2.py
+backup/
+extrator-de-questoes/
+src/*.egg-info/
+provas fontes/
+workspace/
+backup/
+__pycache__/
+*.egg-info/
+.env

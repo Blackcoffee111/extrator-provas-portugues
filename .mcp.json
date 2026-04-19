@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "exames-pipeline": {
+      "command": "/opt/homebrew/bin/python3.11",
+      "args": ["-m", "exames_pipeline.mcp_server"],
+      "env": {
+        "PYTHONPATH": "/Users/adrianoushinohama/Desktop/Exames Nacionais/src",
+        "PIPELINE_ROOT": "/Users/adrianoushinohama/Desktop/Exames Nacionais",
+        "MINERU_PYTHON": "/Users/adrianoushinohama/Desktop/Exames Nacionais/.venv-mineru/bin/python"
+      }
+    }
+  }
+}
