@@ -12,6 +12,7 @@ from .utils import (
     _MATERIA_CODES,
     extract_inferred_alternatives,
     extract_notas_rodape,
+    extract_pt_group_contexts,
     infer_fonte_from_path,
     is_optional_marker,
     split_markdown_question_blocks,
@@ -181,6 +182,12 @@ def structure_markdown(settings: Settings, markdown_path: Path, fonte: str = "")
         for block in blocks
         if block.is_context_stem
     }
+    # Para provas de Português: preâmbulos de grupo/parte (excerto, texto expositivo, tema)
+    pt_contexts: dict[tuple[str, str], str] = (
+        extract_pt_group_contexts(markdown_text, blocks)
+        if resolved_materia == "Português"
+        else {}
+    )
 
     questions: list[Question] = []
     traces: list[dict] = []
@@ -231,7 +238,11 @@ def structure_markdown(settings: Settings, markdown_path: Path, fonte: str = "")
             )
             continue
 
-        ctx = parent_context.get(block.numero_principal, "")
+        ctx = (
+            parent_context.get(block.numero_principal, "")
+            or pt_contexts.get((block.grupo, block.parte), "")
+            or pt_contexts.get((block.grupo, ""), "")
+        )
         draft = _build_draft_question(block, resolved_fonte, ctx)
         questions.append(draft)
         traces.append(
@@ -259,6 +270,39 @@ def structure_markdown(settings: Settings, markdown_path: Path, fonte: str = "")
             int(q.subitem) if q.subitem and q.subitem.isdigit() else 0,
         ),
     )
+
+    # Criar context_stem sintéticos para preâmbulos de grupo/parte PT
+    # (excerto literário, texto expositivo, tema de dissertação)
+    if pt_contexts:
+        import json as _json
+        _GRUPO_ORDER = {"I": 0, "II": 1, "III": 2, "IV": 3, "V": 4}
+        pt_stems: list[Question] = []
+        for (grupo, parte), preamble in sorted(
+            pt_contexts.items(), key=lambda kv: (_GRUPO_ORDER.get(kv[0][0], 9), kv[0][1])
+        ):
+            suffix = f"{grupo}-{parte}-ctx" if parte else f"{grupo}-ctx"
+            notas = extract_notas_rodape(preamble)
+            obs: list[str] = (
+                [f"[notas_rodape] {_json.dumps(notas, ensure_ascii=False)}"]
+                if notas else []
+            )
+            pt_stems.append(Question(
+                numero_questao=0,
+                enunciado=preamble,
+                id_item=suffix,
+                ordem_item=0,
+                numero_principal=0,
+                tipo_item="context_stem",
+                status="approved",
+                fonte=resolved_fonte,
+                materia=resolved_materia,
+                grupo=grupo,
+                reviewed=False,
+                texto_original=preamble,
+                observacoes=obs,
+            ))
+        questions = pt_stems + questions
+
     _apply_group_ids(questions)
 
     raw_json_path = output_dir / "questoes_raw.json"

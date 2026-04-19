@@ -97,6 +97,7 @@ class MarkdownQuestionBlock:
     inferred_type: str = "unknown"
     grupo: str = ""          # "I", "II", … — vazio quando a prova não tem grupos
     is_context_stem: bool = False
+    parte: str = ""          # "A", "B", "C" — vazio quando não há subdivisão PT
     pool_opcional: str = ""  # "I-opt", "II-opt" — vazio = item obrigatório
 
 
@@ -276,6 +277,70 @@ def extract_notas_rodape(text: str) -> list[dict]:
         num = raw_num.translate(str.maketrans("¹²³⁴⁵⁶⁷⁸⁹", "123456789"))
         notas.append({"numero": num, "texto": m.group("texto").strip()})
     return notas
+
+
+def extract_pt_group_contexts(
+    markdown_text: str,
+    blocks: "list[MarkdownQuestionBlock]",
+) -> dict[tuple[str, str], str]:
+    """Extrai texto de preâmbulo (excerto, intro) antes do 1.º item de cada (grupo, parte).
+
+    Usado apenas para provas de Português. Devolve dict (grupo, parte) → texto.
+    Semântica das chaves:
+    - ("I", "")  = texto entre # GRUPO I e ## PARTE A (= excerto literário)
+    - ("I", "A") = texto entre ## PARTE A e 1.ª questão de PARTE A (geralmente vazio)
+    - ("II", "") = texto entre # GRUPO II e 1.ª questão (= texto expositivo)
+    - ("III","") = texto entre # GRUPO III e 1.ª questão (= tema de dissertação)
+    """
+    if not blocks:
+        return {}
+
+    lines = markdown_text.splitlines(keepends=True)
+
+    def _char_pos(line_no: int) -> int:
+        return sum(len(l) for l in lines[: line_no - 1]) if line_no > 1 else 0
+
+    # Eventos ordenados: (heading_start, text_start, grupo, parte)
+    all_events: list[tuple[int, int, str, str]] = []
+    grupo_current = ""
+    parte_current = ""
+    for m in sorted(
+        [*_GRUPO_HEADING_RE.finditer(markdown_text), *_PARTE_HEADING_RE.finditer(markdown_text)],
+        key=lambda m: m.start(),
+    ):
+        line_end = markdown_text.find("\n", m.start())
+        text_start = line_end + 1 if line_end >= 0 else len(markdown_text)
+        gd = m.groupdict()
+        if gd.get("num") is not None:
+            grupo_current = _ROMANO_CANON.get(gd["num"].upper(), gd["num"].upper())
+            parte_current = ""
+        else:
+            parte_current = (gd.get("letra") or "").upper()
+        all_events.append((m.start(), text_start, grupo_current, parte_current))
+
+    if not all_events:
+        return {}
+
+    # Posição do 1.º bloco de cada (grupo, parte)
+    first_block_char: dict[tuple[str, str], int] = {}
+    for block in blocks:
+        key = (block.grupo, block.parte)
+        cpos = _char_pos(block.source_span.get("line_start", 1))
+        if key not in first_block_char or cpos < first_block_char[key]:
+            first_block_char[key] = cpos
+
+    result: dict[tuple[str, str], str] = {}
+    for i, (heading_start, text_start, grupo, parte) in enumerate(all_events):
+        next_boundary = all_events[i + 1][0] if i + 1 < len(all_events) else len(markdown_text)
+        first_q = first_block_char.get((grupo, parte), next_boundary)
+        preamble_end = min(next_boundary, first_q)
+        preamble = markdown_text[text_start:preamble_end].strip()
+        # Remover sub-cabeçalhos que possam ter ficado no intervalo
+        preamble = re.sub(r"(?m)^#{1,4}[^\n]*\n?", "", preamble).strip()
+        if len(preamble) > 30:
+            result[(grupo, parte)] = preamble
+
+    return result
 
 
 def detect_partes(markdown_text: str) -> list[tuple[int, str]]:
@@ -980,14 +1045,29 @@ def split_markdown_question_blocks(markdown_text: str) -> list[MarkdownQuestionB
     # ── Atribuir PARTE (A/B/C) para Grupos com subdivisões PT ────────────────
     parte_breakpoints = detect_partes(markdown_text)
     if parte_breakpoints:
+        # Combinar breakpoints de GRUPO e PARTE em ordem; GRUPO reseta a parte ativa
+        _grupo_bps: list[tuple[int, str | None]] = [
+            (m.start(), None)  # None = sinal de reset de parte
+            for m in _GRUPO_HEADING_RE.finditer(markdown_text)
+        ]
+        _parte_bps: list[tuple[int, str | None]] = [
+            (pos, letra) for pos, letra in parte_breakpoints
+        ]
+        _all_bps: list[tuple[int, str | None]] = sorted(
+            _grupo_bps + _parte_bps, key=lambda x: x[0]
+        )
         lines = markdown_text.splitlines(keepends=True)
         for block in blocks:
             pos = block.source_span.get("line_start", 0)
             char_pos = sum(len(l) for l in lines[: pos - 1]) if pos > 1 else 0
             parte_ativa = ""
-            for bp_pos, bp_letra in parte_breakpoints:
+            for bp_pos, bp_val in _all_bps:
                 if bp_pos <= char_pos:
-                    parte_ativa = bp_letra
+                    if bp_val is None:
+                        parte_ativa = ""   # novo GRUPO reseta a parte
+                    else:
+                        parte_ativa = bp_val
+            block.parte = parte_ativa
             if parte_ativa:
                 # Prefixar id_item com a PARTE: "I-1" → "I-A-1"
                 # Só aplicar se o id_item ainda não contém a parte

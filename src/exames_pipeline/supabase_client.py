@@ -537,13 +537,16 @@ def upload_to_supabase(
 
         # Descobrir contexto_id: o pai é o prefixo antes do primeiro ponto.
         # Priorizar id_item (lida com "II-1.1" → "II-1" e "1.1" → "1");
-        # fallback para numero_principal em formatos antigos sem grupo.
+        # fallback para numero_principal em formatos antigos sem grupo;
+        # fallback PT: contexto de grupo ("<grupo>-ctx") para provas de Português.
         contexto_id: str | None = None
         if "." in q.id_item:
             pai = q.id_item.split(".")[0]
             contexto_id = contexto_map.get(pai)
         if contexto_id is None and q.numero_principal is not None:
             contexto_id = contexto_map.get(str(q.numero_principal))
+        if contexto_id is None and q.grupo:
+            contexto_id = contexto_map.get(f"{q.grupo}-ctx")
 
         # Resolver tópico
         topico_id: str | None = None
