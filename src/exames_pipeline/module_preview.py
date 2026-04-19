@@ -273,18 +273,15 @@ def _render_question(q: Question, index: int, show_context: bool = True, overrid
     </div>
   </div>"""
 
-    # Para context_stem próprio: notas_rodape guardadas em observacoes
-    if tipo == "context_stem" and q.observacoes:
-        notas = _extract_notas_rodape_from_obs(q.observacoes)
-        if notas:
-            ctx_html = _render_context_text(q.enunciado or "", notas)
-            # Substituir enunciado_block por versão com linhas numeradas + notas
-            enunciado_html = ctx_html
-
     # ── Enunciado ────────────────────────────────────────────────────────────
     enunciado_raw = q.enunciado or ""
-    enunciado_html = _md_to_html(enunciado_raw)
-    enunciado_esc  = html.escape(enunciado_raw)
+    enunciado_esc = html.escape(enunciado_raw)
+    if tipo == "context_stem":
+        # Renderizar com layout de linhas numeradas + notas de rodapé PT
+        notas = _extract_notas_rodape_from_obs(q.observacoes) if q.observacoes else []
+        enunciado_html = _render_context_text(enunciado_raw, notas or None)
+    else:
+        enunciado_html = _md_to_html(enunciado_raw)
 
     enunciado_block = f"""
   <div class="field-block">
@@ -844,6 +841,26 @@ h1 {{ font-size: 1.5rem; margin-bottom: .25rem; color: #0f172a; }}
 }}
 .update-banner button:hover {{ background: #d97706; }}
 .stat-overlay {{ border-color: #bfdbfe; }}
+
+/* Agrupamento por Grupo/Parte (Português) */
+.grupo-section {{
+  margin-bottom: 2.5rem;
+}}
+.grupo-header {{
+  font-size: 1.1rem; font-weight: 800; color: #1e293b;
+  letter-spacing: .04em; text-transform: uppercase;
+  border-bottom: 3px solid #6366f1; padding-bottom: .4rem;
+  margin-bottom: 1.25rem;
+}}
+.parte-section {{
+  margin-left: 0; margin-bottom: 1rem;
+}}
+.parte-header {{
+  font-size: .85rem; font-weight: 700; color: #6366f1;
+  letter-spacing: .05em; text-transform: uppercase;
+  border-left: 3px solid #6366f1; padding-left: .6rem;
+  margin-bottom: .75rem; margin-top: 1.25rem;
+}}
 </style>
 </head>
 <body>
@@ -1160,6 +1177,86 @@ setInterval(pollOverlayVersion, 10000);
 </html>"""
 
 
+# ── Renderização agrupada por Grupo/Parte (Português) ────────────────────────
+
+def _build_pt_grouped_html(
+    paired: list[tuple[Question, dict]],
+) -> str:
+    """Renderiza questões PT agrupadas por GRUPO e PARTE.
+
+    context_stem cards aparecem no topo de cada grupo/parte.
+    Questões regulares nunca mostram enunciado_contexto_pai (está no stem acima).
+    """
+    _GRUPO_ORDER = {"I": 0, "II": 1, "III": 2, "IV": 3, "V": 4}
+
+    # Separar context_stems de questões por chave (grupo, parte)
+    stems: dict[tuple[str, str], list[tuple[Question, dict]]] = {}
+    regulares: dict[tuple[str, str], list[tuple[Question, dict]]] = {}
+    for q, ov in paired:
+        if q.tipo_item == "context_stem":
+            # Determinar parte a partir de id_item: "I-A-ctx" → parte="A"; "I-ctx" → parte=""
+            parts = q.id_item.split("-")
+            parte = parts[1] if len(parts) == 3 and parts[1] in ("A", "B", "C") else ""
+            key = (q.grupo, parte)
+            stems.setdefault(key, []).append((q, ov))
+        else:
+            parts = q.id_item.split("-")
+            parte = parts[1] if len(parts) >= 3 and parts[1] in ("A", "B", "C") else ""
+            key = (q.grupo, parte)
+            regulares.setdefault(key, []).append((q, ov))
+
+    # Todos os grupos presentes, ordenados
+    all_grupos = sorted(
+        {q.grupo for q, _ in paired if q.grupo},
+        key=lambda g: _GRUPO_ORDER.get(g, 9),
+    )
+
+    html_parts: list[str] = []
+    idx = 0
+    for grupo in all_grupos:
+        html_parts.append(f'<div class="grupo-section" data-grupo="{html.escape(grupo)}">')
+        html_parts.append(f'<div class="grupo-header">Grupo {html.escape(grupo)}</div>')
+
+        # Stem de grupo ("I-ctx", "II-ctx", "III-ctx")
+        for stem_q, stem_ov in stems.get((grupo, ""), []):
+            idx += 1
+            html_parts.append(_render_question(stem_q, idx, show_context=False, overrides=stem_ov))
+
+        # Partes dentro deste grupo
+        partes_presentes = sorted(
+            {p for (g, p) in list(stems.keys()) + list(regulares.keys()) if g == grupo and p},
+        )
+
+        if partes_presentes:
+            for parte in partes_presentes:
+                html_parts.append(f'<div class="parte-section" data-parte="{html.escape(parte)}">')
+                html_parts.append(f'<div class="parte-header">Parte {html.escape(parte)}</div>')
+                # Stem de parte ("I-A-ctx", …)
+                for stem_q, stem_ov in stems.get((grupo, parte), []):
+                    idx += 1
+                    html_parts.append(_render_question(stem_q, idx, show_context=False, overrides=stem_ov))
+                # Questões da parte
+                for reg_q, reg_ov in regulares.get((grupo, parte), []):
+                    idx += 1
+                    html_parts.append(_render_question(reg_q, idx, show_context=False, overrides=reg_ov))
+                html_parts.append("</div>")
+        else:
+            # Grupo sem subdivisão de partes (GRUPO II, III)
+            for reg_q, reg_ov in regulares.get((grupo, ""), []):
+                idx += 1
+                html_parts.append(_render_question(reg_q, idx, show_context=False, overrides=reg_ov))
+
+        html_parts.append("</div>")
+
+    # Questões sem grupo (provas antigas ou não-PT): renderização linear
+    for q, ov in paired:
+        if not q.grupo:
+            idx += 1
+            html_parts.append(_render_question(q, idx, show_context=(q.subitem is None), overrides=ov))
+
+    return "\n".join(html_parts)
+
+
 # ── Construção do HTML ────────────────────────────────────────────────────────
 
 _MATHJAX_SCRIPTS = """\
@@ -1248,15 +1345,21 @@ def _build_html(
     mathjax_scripts = "" if is_pt else _MATHJAX_SCRIPTS
 
     n_mc   = sum(1 for q in questions if q.tipo_item == "multiple_choice")
-    n_or   = sum(1 for q in questions if q.tipo_item == "open_response")
-    n_err  = sum(1 for q in questions if q.status == "error")
-    n_warn = sum(1 for q in questions if "warning" in (q.status or ""))
+    n_or   = sum(1 for q in questions if q.tipo_item in ("open_response", "essay", "complete_table", "multi_select"))
+    n_err  = sum(1 for q in questions if q.status == "error" and q.tipo_item != "context_stem")
+    n_warn = sum(1 for q in questions if "warning" in (q.status or "") and q.tipo_item != "context_stem")
 
-    # Subitens: não mostrar contexto pai (o card do context_stem pai já está visível acima)
-    questions_html = "\n".join(
-        _render_question(q, i, show_context=(q.subitem is None), overrides=ov)
-        for i, (q, ov) in enumerate(zip(questions, q_overrides), 1)
-    )
+    has_grupos = any(q.grupo for q in questions)
+    if is_pt and has_grupos:
+        # PT: renderização agrupada por Grupo/Parte; context_stems mostram o excerto,
+        # questões regulares não repetem o contexto (já exibido no card do stem acima)
+        questions_html = _build_pt_grouped_html(deduped_paired)
+    else:
+        # Matemática e outros: contexto pai só nos itens sem subitem
+        questions_html = "\n".join(
+            _render_question(q, i, show_context=(q.subitem is None), overrides=ov)
+            for i, (q, ov) in enumerate(zip(questions, q_overrides), 1)
+        )
 
     approved_banner = (
         '<div class="approved-banner" style="background:#dcfce7;border:1px solid #86efac;'

@@ -201,6 +201,12 @@ Cada item gerado pelo `run_stage(stage='extract')` tem `"reviewed": false`. O ag
 5. Setar `"reviewed": true` no item após revisar
 6. Para verificar o OCR bruto de um item: `get_question_context(workspace, id_item)` — devolve o extrato do `prova.md` sem ler o ficheiro inteiro
 
+**Itens `context_stem` em provas de Português** (id_item do tipo `"I-ctx"`, `"II-ctx"`, `"III-ctx"`):
+- Representam o excerto literário (GRUPO I), texto expositivo (GRUPO II) e tema de dissertação (GRUPO III)
+- Revisão obrigatória: tipografia PT («», …, diacríticos), numeração de linhas do excerto, notas de rodapé
+- **Não** precisam de `tema`/`subtema`/`tags` — o validador ignora categorização para `context_stem`
+- Setar `"reviewed": true` depois de verificar o texto — idêntico às questões regulares
+
 `run_stage(stage='validate')` faz o merge de `questoes_review.json` + `questoes_meta.json` antes do lint.  
 `run_stage(stage='validate')` bloqueia se existirem itens com `"reviewed": false`.  
 O mesmo contrato aplica-se a `criterios_raw.json` no fluxo CC-VD (sem categorização).
