@@ -85,7 +85,7 @@ def _pre_questions_offset(markdown_text: str) -> int:
     return m.start() if m else 0
 
 
-def _build_draft_question(block, resolved_fonte: str, ctx: str) -> Question:
+def _build_draft_question(block, resolved_fonte: str, resolved_materia: str, ctx: str) -> Question:
     alternatives = [
         {"letra": letter, "texto": text}
         for letter, text in extract_inferred_alternatives(block.raw_markdown)
@@ -243,7 +243,7 @@ def structure_markdown(settings: Settings, markdown_path: Path, fonte: str = "")
             or pt_contexts.get((block.grupo, block.parte), "")
             or pt_contexts.get((block.grupo, ""), "")
         )
-        draft = _build_draft_question(block, resolved_fonte, ctx)
+        draft = _build_draft_question(block, resolved_fonte, resolved_materia, ctx)
         questions.append(draft)
         traces.append(
             {
