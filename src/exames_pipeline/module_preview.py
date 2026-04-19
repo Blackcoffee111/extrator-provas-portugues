@@ -95,6 +95,62 @@ def _md_to_html(text: str) -> str:
     return text
 
 
+# ── Render de contexto PT (excerto com linhas numeradas + notas de rodapé) ────
+
+_LINE_NUM_PREFIX_RE = re.compile(r"^(\d{1,3})\s+(.+)$")
+
+
+def _render_context_text(text: str, notas_rodape: list[dict] | None = None) -> str:
+    """Renderiza texto de contexto, detectando linhas numeradas estilo PT."""
+    lines = text.splitlines()
+    numbered = [_LINE_NUM_PREFIX_RE.match(ln) for ln in lines if ln.strip()]
+    use_numbers = sum(1 for m in numbered if m) >= max(3, len(lines) // 2)
+
+    if use_numbers:
+        rows = ""
+        for ln in lines:
+            stripped = ln.strip()
+            if not stripped:
+                rows += '<div class="context-line"><span class="line-num"></span><span class="line-text">&nbsp;</span></div>'
+                continue
+            m = _LINE_NUM_PREFIX_RE.match(stripped)
+            if m:
+                num, content = m.group(1), m.group(2)
+                rows += (f'<div class="context-line">'
+                         f'<span class="line-num">{html.escape(num)}</span>'
+                         f'<span class="line-text">{html.escape(content)}</span>'
+                         f'</div>')
+            else:
+                rows += (f'<div class="context-line">'
+                         f'<span class="line-num"></span>'
+                         f'<span class="line-text">{html.escape(stripped)}</span>'
+                         f'</div>')
+        body = f'<div class="context-lines">{rows}</div>'
+    else:
+        body = _md_to_html(text)
+
+    if notas_rodape:
+        items = "".join(
+            f'<div class="nota-rodape"><sup>{html.escape(str(n.get("numero", i+1)))}</sup> '
+            f'{html.escape(str(n.get("texto", "")))}</div>'
+            for i, n in enumerate(notas_rodape)
+        )
+        body += f'<div class="notas-rodape"><div class="notas-rodape-label">Notas</div>{items}</div>'
+
+    return body
+
+
+def _extract_notas_rodape_from_obs(observacoes: list[str]) -> list[dict]:
+    """Extrai notas_rodape guardadas em observacoes como JSON."""
+    for obs in observacoes:
+        if obs.startswith("notas_rodape:"):
+            try:
+                return json.loads(obs[len("notas_rodape:"):].strip())
+            except (json.JSONDecodeError, ValueError):
+                pass
+    return []
+
+
 # ── Badges ────────────────────────────────────────────────────────────────────
 
 def _status_badge(status: str) -> str:
@@ -145,6 +201,9 @@ def _render_question(q: Question, index: int, show_context: bool = True) -> str:
     <select class="header-select tipo-select" data-field="tipo_item" title="Tipo">
       <option value="multiple_choice"{'selected' if tipo=='multiple_choice' else ''}>EM</option>
       <option value="open_response"{'selected' if tipo=='open_response' else ''}>RD</option>
+      <option value="essay"{'selected' if tipo=='essay' else ''}>Dis</option>
+      <option value="complete_table"{'selected' if tipo=='complete_table' else ''}>Tab</option>
+      <option value="multi_select"{'selected' if tipo=='multi_select' else ''}>MS</option>
       <option value="context_stem"{'selected' if tipo=='context_stem' else ''}>CTX</option>
       <option value="composite"{'selected' if tipo=='composite' else ''}>CP</option>
     </select>
@@ -159,12 +218,20 @@ def _render_question(q: Question, index: int, show_context: bool = True) -> str:
     # ── Contexto pai (enunciado partilhado) ──────────────────────────────────
     contexto_block = ""
     if show_context and q.enunciado_contexto_pai:
-        ctx_html = _md_to_html(q.enunciado_contexto_pai)
+        ctx_html = _render_context_text(q.enunciado_contexto_pai)
         contexto_block = f"""
   <div class="field-block context-block">
     <div class="field-label" style="color:#6b7280">Contexto</div>
     <div class="field-text enunciado-text" style="background:#f0f9ff;border-left:3px solid #3b82f6;padding-left:10px">{ctx_html}</div>
   </div>"""
+
+    # Para context_stem próprio: notas_rodape guardadas em observacoes
+    if tipo == "context_stem" and q.observacoes:
+        notas = _extract_notas_rodape_from_obs(q.observacoes)
+        if notas:
+            ctx_html = _render_context_text(q.enunciado or "", notas)
+            # Substituir enunciado_block por versão com linhas numeradas + notas
+            enunciado_html = ctx_html
 
     # ── Enunciado ────────────────────────────────────────────────────────────
     enunciado_raw = q.enunciado or ""
@@ -390,13 +457,7 @@ _HTML_TEMPLATE = """\
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{title} — Preview Questões</title>
-<script>
-MathJax = {{
-  tex: {{ inlineMath: [['\\\\(','\\\\)'],['$','$']], displayMath: [['\\\\[','\\\\]'],['$$','$$']] }},
-  options: {{ skipHtmlTags: ['script','noscript','style','textarea','pre'] }}
-}};
-</script>
-<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+{mathjax_scripts}
 <style>
 *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
 body {{
@@ -478,6 +539,21 @@ h1 {{ font-size: 1.5rem; margin-bottom: .25rem; color: #0f172a; }}
 .field-text p {{ margin-bottom: .6rem; }}
 .field-text ul {{ margin: .4rem 0 .6rem 1.4rem; }}
 .math-block {{ display: block; overflow-x: auto; margin: .6rem 0; }}
+
+/* Contexto PT: excerto com numeração de linha */
+.context-lines {{ display: table; width: 100%; font-size: .88rem; line-height: 1.7; border-spacing: 0; }}
+.context-line  {{ display: table-row; }}
+.line-num      {{ display: table-cell; width: 2.5rem; color: #94a3b8; font-size: .75rem;
+                  text-align: right; padding-right: .6rem; user-select: none; vertical-align: top;
+                  padding-top: .1rem; font-family: monospace; }}
+.line-text     {{ display: table-cell; vertical-align: top; }}
+
+/* Notas de rodapé PT */
+.notas-rodape  {{ margin-top: .75rem; padding-top: .6rem; border-top: 1px solid #e2e8f0;
+                  font-size: .78rem; color: #64748b; }}
+.notas-rodape-label {{ font-weight: 700; font-size: .7rem; text-transform: uppercase;
+                       letter-spacing: .04em; margin-bottom: .3rem; color: #94a3b8; }}
+.nota-rodape   {{ line-height: 1.5; margin-bottom: .2rem; }}
 
 /* Edit button */
 .edit-btn {{
@@ -960,6 +1036,16 @@ function submitFallback() {{
 
 # ── Construção do HTML ────────────────────────────────────────────────────────
 
+_MATHJAX_SCRIPTS = """\
+<script>
+MathJax = {{
+  tex: {{ inlineMath: [['\\\\(','\\\\)'],['$','$']], displayMath: [['\\\\[','\\\\]'],['$$','$$']] }},
+  options: {{ skipHtmlTags: ['script','noscript','style','textarea','pre'] }}
+}};
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>"""
+
+
 def _build_html(approved_path: Path, rejected_path: Path | None, already_approved: bool = False) -> str:
     questions: list[Question] = load_questions(approved_path)
     if rejected_path and rejected_path.exists():
@@ -989,6 +1075,12 @@ def _build_html(approved_path: Path, rejected_path: Path | None, already_approve
     questions = deduped
 
     title = (questions[0].fonte if questions else approved_path.parent.name)
+
+    # Detectar matéria para MathJax condicional
+    first_materia = (questions[0].materia if questions else "") or ""
+    is_pt = "portugu" in first_materia.lower() or "portugu" in str(approved_path).lower()
+    mathjax_scripts = "" if is_pt else _MATHJAX_SCRIPTS
+
     n_mc   = sum(1 for q in questions if q.tipo_item == "multiple_choice")
     n_or   = sum(1 for q in questions if q.tipo_item == "open_response")
     n_err  = sum(1 for q in questions if q.status == "error")
@@ -1018,6 +1110,7 @@ def _build_html(approved_path: Path, rejected_path: Path | None, already_approve
         n_warn=n_warn,
         questions_html=questions_html,
         approved_banner=approved_banner,
+        mathjax_scripts=mathjax_scripts,
         already_approved_js="true" if already_approved else "false",
         already_approved_class=" already-approved" if already_approved else "",
         approve_label="✅ Aprovado para Upload" if already_approved else "✅ Aprovar para Upload",
