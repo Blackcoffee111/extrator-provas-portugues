@@ -260,6 +260,17 @@ def _get_or_create_topico(
         return rows2[0]["id"]
 
 
+def _extract_notas_rodape(observacoes: list[str]) -> list[dict]:
+    """Extrai notas_rodape guardadas em observacoes como 'notas_rodape: [...]'."""
+    for obs in (observacoes or []):
+        if obs.startswith("notas_rodape:"):
+            try:
+                return json.loads(obs[len("notas_rodape:"):].strip())
+            except (json.JSONDecodeError, ValueError):
+                pass
+    return []
+
+
 def _upsert_contexto(
     settings: Settings,
     headers: dict[str, str],
@@ -269,6 +280,7 @@ def _upsert_contexto(
 ) -> str:
     """Cria ou actualiza um contexto a partir de um item context_stem."""
     imagens_json = _build_imagens_jsonb(q, url_map)
+    notas_rodape = _extract_notas_rodape(q.observacoes)
     url = (f"{settings.supabase_url}/rest/v1/contextos"
            f"?on_conflict=fonte_id,id_item_original")
     result = _request(
@@ -281,6 +293,7 @@ def _upsert_contexto(
             "grupo":            q.grupo or "",
             "id_item_original": q.id_item,
             "pagina_origem":    q.pagina_origem,
+            "notas_rodape":     notas_rodape or [],
         },
     )
     return (result[0] if isinstance(result, list) else result)["id"]
@@ -380,6 +393,12 @@ def _question_to_row(
         "descricao_breve": q.descricao_breve or "",
         # Legível desnormalizado
         "fonte":         q.fonte or "",
+        # Campos PT (nullable — ignorados para Matemática A)
+        "pool_opcional":            q.pool_opcional or None,
+        "palavras_min":             q.palavras_min,
+        "palavras_max":             q.palavras_max,
+        "linhas_referenciadas":     q.linhas_referenciadas or [],
+        "parametros_classificacao": q.parametros_classificacao or [],
         # Metadados
         "pagina_origem": q.pagina_origem,
         "status":        q.status or "approved",
