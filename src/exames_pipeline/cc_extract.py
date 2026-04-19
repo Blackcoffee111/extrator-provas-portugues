@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .cc_ocr_lint import lint_criterios
 from .config import Settings
 from .schemas import CriterioRaw, dump_criterios, dump_json
 from .utils import infer_fonte_from_path
@@ -107,27 +108,72 @@ def _parse_open_criteria(block: str) -> tuple[list[dict], list[str], str]:
     Extrai critérios de um item de resposta aberta usando apenas regex.
     Suporta múltiplos processos separados por "N.º Processo".
     Retorna (criterios_parciais, resolucoes_alternativas, contexto).
+
+    Quando existem separadores de processo:
+    - Os steps top-level (antes do 1.º Processo) são extraídos normalmente.
+    - O último step top-level recebe o texto integral do 1.º Processo agregado
+      na sua `descricao`, incluindo o texto de transição ("Esta etapa pode ser
+      resolvida por, pelo menos, dois processos.") e os sub-passos do processo.
+    - Os processos alternativos (2.º, 3.º…) continuam em `resolucoes_alternativas`.
+    Isto garante que os critérios parciais contêm o conteúdo integral até ao fim
+    do 1.º Processo, sem sumarização.
     """
     process_matches = list(_PROCESS_SEP_RE.finditer(block))
 
+    def _attach_p1_to_last_step(
+        pre_text: str,
+        p1_label: str,
+        p1_text: str,
+    ) -> list[dict]:
+        """
+        Analisa os steps top-level de `pre_text` e agrega o texto completo do
+        1.º Processo ao último step. O texto de transição entre o último marker
+        de pontos e o início do 1.º Processo (ex: "Esta etapa pode ser resolvida
+        por, pelo menos, dois processos.") é incluído.
+        """
+        top_steps = _parse_steps(pre_text)
+        if not top_steps:
+            # Sem steps no pré-texto: usar os sub-passos do 1.º Processo directamente
+            return _parse_steps(p1_text)
+
+        # Texto de transição: tudo o que fica após o último "N pontos" em pre_text
+        pts_markers = list(re.finditer(r'\b\d+\s+pont[oa]s?\b', pre_text))
+        if pts_markers:
+            transition = pre_text[pts_markers[-1].end():].strip()
+        else:
+            transition = ""
+
+        p1_full = p1_label.strip()
+        if p1_text.strip():
+            p1_full += "\n" + p1_text.strip()
+
+        last = top_steps[-1]
+        parts = [last["descricao"]]
+        if transition:
+            parts.append(transition)
+        parts.append(p1_full)
+        last["descricao"] = "\n\n".join(parts)
+        return top_steps
+
     if len(process_matches) >= 2:
-        # Texto antes do 1.º Processo = contexto introdutório
-        contexto = block[:process_matches[0].start()].strip()
-        # Texto do 1.º processo: entre match[0].end() e match[1].start()
-        p1_text = block[process_matches[0].end():process_matches[1].start()]
-        criterios_parciais = _parse_steps(p1_text)
+        pre_text = block[:process_matches[0].start()]
+        p1_label = block[process_matches[0].start():process_matches[0].end()]
+        p1_text  = block[process_matches[0].end():process_matches[1].start()]
+        criterios_parciais = _attach_p1_to_last_step(pre_text, p1_label, p1_text)
         # Processos alternativos: texto de cada processo a partir do 2.º
         resolucoes_alternativas = []
         for j in range(1, len(process_matches)):
             start = process_matches[j].start()
             end = process_matches[j + 1].start() if j + 1 < len(process_matches) else len(block)
             resolucoes_alternativas.append(block[start:end].strip())
+        contexto = ""
     elif len(process_matches) == 1:
-        # Um só processo com separador explícito
-        contexto = block[:process_matches[0].start()].strip()
-        p1_text = block[process_matches[0].end():]
-        criterios_parciais = _parse_steps(p1_text)
+        pre_text = block[:process_matches[0].start()]
+        p1_label = block[process_matches[0].start():process_matches[0].end()]
+        p1_text  = block[process_matches[0].end():]
+        criterios_parciais = _attach_p1_to_last_step(pre_text, p1_label, p1_text)
         resolucoes_alternativas = []
+        contexto = ""
     else:
         contexto = ""
         criterios_parciais = _parse_steps(block)
@@ -156,6 +202,97 @@ class _CCBlock:
     id_item: str
     cotacao: int
     text: str
+
+
+# ── Auto-correções LaTeX de alta confiança (Matemática A) ────────────────────
+
+_AUTO_CORRECTIONS_MATH: list[tuple[re.Pattern[str], str, str]] = [
+    (re.compile(r'\\frac\s+\{'),   r'\\frac{',  'espaço espúrio em \\frac'),
+    (re.compile(r'\\sqrt\s+\{'),   r'\\sqrt{',  'espaço espúrio em \\sqrt'),
+    (re.compile(r'\\left\s+\('),   r'\\left(',  'espaço espúrio em \\left('),
+    (re.compile(r'\\left\s+\['),   r'\\left[',  'espaço espúrio em \\left['),
+    (re.compile(r'\\right\s+\)'),  r'\\right)', 'espaço espúrio em \\right)'),
+    (re.compile(r'\\right\s+\]'),  r'\\right]', 'espaço espúrio em \\right]'),
+    (re.compile(r'(?<!\$)(?<![a-zA-Z]) ([,\.])'), r'\1', 'espaço antes de pontuação'),
+    (re.compile(r'(?<![a-zA-Z\\])ight(?=\s*[\(\)\[\]|.\\])'), r'\\right', 'OCR ight→\\right'),
+    (re.compile(r'(?<![a-zA-Z\\])rac(?=\{)'), r'\\frac', 'OCR rac→\\frac'),
+    (re.compile(r'\\sen\b'), r'\\sin', '\\sen→\\sin'),
+]
+
+# Auto-correções tipográficas PT (CC de Português)
+_AUTO_CORRECTIONS_PT: list[tuple[re.Pattern[str], str, str]] = [
+    (re.compile(r'(?<!\$)(?<![a-zA-Z]) ([,\.])'), r'\1', 'espaço antes de pontuação'),
+    (re.compile(r'\.\.\.'), '…', 'reticências normalizadas'),
+]
+
+# Deteção de níveis de desempenho PT: "Nível 5", "N5", "Nível N5", "nível 4 – ..."
+_NIVEL_DESEMPENHO_RE = re.compile(
+    r'(?i)n[íi]vel\s*(?:N\s*)?(\d)\b'
+)
+# Parâmetros de classificação PT (A, B, C com pontuação total)
+_PARAMETRO_RE = re.compile(
+    r'(?m)^#+\s*Par[âa]metro\s+([A-C])\b|^Par[âa]metro\s+([A-C])\b',
+    re.IGNORECASE,
+)
+
+
+def _auto_correct(text: str, is_pt: bool = False) -> tuple[str, list[str]]:
+    """Aplica correcções determinísticas de alta confiança antes do parse."""
+    corrections = _AUTO_CORRECTIONS_PT if is_pt else _AUTO_CORRECTIONS_MATH
+    fixes: list[str] = []
+    for pattern, replacement, label in corrections:
+        new_text = pattern.sub(replacement, text)
+        if new_text != text:
+            fixes.append(label)
+            text = new_text
+    return text, fixes
+
+
+def _parse_niveis_desempenho(text: str) -> list[dict]:
+    """Extrai níveis de desempenho PT: N5/N4/N3/N2/N1 com pontuações.
+
+    Formato esperado no CC-VD:
+    'Nível 5 (N5)  13 pontos  Texto do descritor...'
+    ou
+    'N5 – 13 pontos – Texto...'
+    """
+    niveis = []
+    for match in re.finditer(
+        r'[Nn][íi]vel\s*(?:[Nn]\s*)?(\d)\b[^\n]*?(\d+)\s*pont',
+        text,
+    ):
+        nivel_num = int(match.group(1))
+        pontos = int(match.group(2))
+        # Extrair texto do descritor (até o próximo nível ou fim de parágrafo)
+        start = match.end()
+        end_match = re.search(r'\n[Nn][íi]vel\s*\d|\n\n', text[start:])
+        descritor = text[start: start + end_match.start()].strip() if end_match else text[start:].strip()
+        niveis.append({
+            "nivel": f"N{nivel_num}",
+            "pontos": pontos,
+            "descritor": descritor[:300],
+        })
+    return niveis
+
+
+# ── Dump compacto para revisão do agente ─────────────────────────────────────
+
+_REVIEW_EXCLUDED = {"texto_original", "imagens", "fonte"}
+
+
+def _dump_review_json(output_dir: Path, criterios: list[CriterioRaw]) -> Path:
+    """Grava criterios_review.json sem texto_original e imagens.
+
+    Este ficheiro é o que o agente deve ler primeiro — mais leve e focado
+    nos campos editáveis. O texto_original fica acessível via get_cc_context().
+    """
+    compact = [
+        {k: v for k, v in c.to_dict().items() if k not in _REVIEW_EXCLUDED}
+        for c in criterios
+    ]
+    path = output_dir / "criterios_review.json"
+    path.write_text(json.dumps(compact, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
 
 
 # ── Funções auxiliares ─────────────────────────────────────────────────────────
@@ -281,6 +418,7 @@ def extract_cc(settings: Settings, markdown_path: Path, fonte: str = "") -> Path
     markdown_path = markdown_path.resolve()
     output_dir = markdown_path.parent
     resolved_fonte = fonte or infer_fonte_from_path(markdown_path)
+    is_pt = "portugu" in resolved_fonte.lower() or "portugu" in str(markdown_path).lower()
 
     markdown = markdown_path.read_text(encoding="utf-8")
     text = _find_criterios_especificos(markdown)
@@ -306,6 +444,7 @@ def extract_cc(settings: Settings, markdown_path: Path, fonte: str = "") -> Path
     mc_preamble_map = _extract_mc_preamble_map(markdown)
 
     for block in blocks:
+        block.text, auto_fixes = _auto_correct(block.text, is_pt=is_pt)
         imagens = _IMAGE_REF_RE.findall(block.text)
         # Caso 1: "Opção (X)" explícito
         mc_match = _MC_ANSWER_RE.search(block.text)
@@ -319,6 +458,7 @@ def extract_cc(settings: Settings, markdown_path: Path, fonte: str = "") -> Path
 
         if mc_letter:
             obs = [] if mc_match else ["Resposta MC extraída do preâmbulo (não estava inline)"]
+            obs += [f"[auto-fix] {f}" for f in auto_fixes]
             criterio = CriterioRaw(
                 id_item=block.id_item,
                 cotacao_total=block.cotacao,
@@ -337,11 +477,23 @@ def extract_cc(settings: Settings, markdown_path: Path, fonte: str = "") -> Path
             icon = "⚠️" if obs else "✅"
             print(f"[cc_extract] {icon} {block.id_item} (EM) → {mc_letter}{' [preâmbulo]' if obs else ''}")
         else:
-            criterios_parciais, resolucoes_alternativas, contexto = _parse_open_criteria(block.text)
+            # PT: tentar detetar níveis de desempenho primeiro
+            if is_pt and _NIVEL_DESEMPENHO_RE.search(block.text):
+                niveis = _parse_niveis_desempenho(block.text)
+                criterios_parciais = (
+                    [{"nivel": n["nivel"], "pontos": n["pontos"], "descricao": n["descritor"]}
+                     for n in niveis]
+                    if niveis else []
+                )
+                resolucoes_alternativas = []
+                contexto = ""
+            else:
+                criterios_parciais, resolucoes_alternativas, contexto = _parse_open_criteria(block.text)
             status = "draft" if criterios_parciais else "pending_review"
             observacoes = []
             if status == "pending_review":
                 observacoes.append("Extractor não conseguiu segmentar etapas com confiança suficiente.")
+            observacoes += [f"[auto-fix] {f}" for f in auto_fixes]
             criterio = CriterioRaw(
                 id_item=block.id_item,
                 cotacao_total=block.cotacao,
@@ -429,4 +581,17 @@ def extract_cc(settings: Settings, markdown_path: Path, fonte: str = "") -> Path
     dump_criterios(output_path, criterios)
     dump_json(traces_path, traces)
     print(f"\n[cc_extract] {len(criterios)} itens → {output_path}")
+
+    # Lint OCR — adiciona OCR-SUSPECT às observações e gera criterios_ocr_flags.json
+    print("")
+    _, n_flagged = lint_criterios(output_path)
+
+    # Re-ler após lint (lint pode ter modificado as observações) para gerar view compacta
+    from .schemas import load_criterios  # noqa: PLC0415
+    criterios_after_lint = load_criterios(output_path)
+    review_path = _dump_review_json(output_dir, criterios_after_lint)
+    print(f"[cc_extract] 📋 criterios_review.json → {review_path.name}")
+    if n_flagged:
+        print(f"[cc_extract] ⚠️  criterios_ocr_flags.json — {n_flagged} item(ns) requerem atenção")
+
     return output_path

@@ -6,7 +6,10 @@ import re
 from .schemas import EstruturaCotacoes, Question, dump_json, dump_questions, load_cotacoes, load_json, load_questions
 
 
-ITEM_ID_PATTERN = re.compile(r"^(?:(?P<grupo>[IVX]+)-)?(?P<main>\d{1,3})(?:\.(?P<sub>\d{1,2}))?$")
+# Suporta: "1", "2.1", "I-1", "II-2.1", "I-A-1", "I-B-6" (Português com partes)
+ITEM_ID_PATTERN = re.compile(
+    r"^(?:(?P<grupo>[IVX]+)-)?(?:(?P<parte>[A-C])-)?(?P<main>\d{1,3})(?:\.(?P<sub>\d{1,2}))?$"
+)
 MISSING_CREDENTIALS_NOTE_PATTERN = re.compile(r"^Fornecedor '.+' sem credenciais;")
 MIN_TEXT_LENGTH = 30
 
@@ -202,6 +205,8 @@ def _validate_alternatives(question: Question) -> list[str]:
             is_latex_constant = bool(re.match(r"^\$[^$]{1,10}\$$", normalized_text))
             if len(normalized_text) < 2 and not re.search(r"\d", normalized_text) and not is_latex_constant:
                 errors.append(f"Alternativa {alt.letra} com texto demasiado curto.")
+    elif question.tipo_item in ("essay", "open_response", "complete_table", "multi_select"):
+        pass  # tipos PT sem alternativas — esperado
     elif alternatives and len(alternatives) not in {0, 4}:
         errors.append(
             f"Questao do tipo '{question.tipo_item}' com alternativas incompletas: {len(alternatives)}."
@@ -758,6 +763,43 @@ def _validate_against_cotacoes(
     return errors_by_id, global_erros, estrutura_inconsistente
 
 
+_MULTI_SELECT_AFFIRMATION_RE = re.compile(
+    r"(?m)^\s*(?:[IVX]+\.|[IVX]+\s)\s+\S",  # "I. texto", "II. texto", "III. texto"
+)
+_TABLE_OR_IMAGE_RE = re.compile(r"!\[|^\|.+\|", re.MULTILINE)
+
+
+def _validate_portugues_tipos(question: Question) -> tuple[list[str], list[str]]:
+    """Validações específicas para tipos de questão de Português."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if question.tipo_item == "essay":
+        if not question.palavras_min and not question.palavras_max:
+            warnings.append(
+                "Tipo 'essay' sem palavras_min/palavras_max definidos: preencher manualmente."
+            )
+
+    if question.tipo_item == "multi_select":
+        afirmacoes = _MULTI_SELECT_AFFIRMATION_RE.findall(question.enunciado or "")
+        if len(afirmacoes) < 3:
+            warnings.append(
+                f"Tipo 'multi_select' com apenas {len(afirmacoes)} afirmações detectadas "
+                "(esperado ≥ 3 afirmações I, II, III…): verificar enunciado."
+            )
+
+    if question.tipo_item == "complete_table":
+        has_table = bool(_TABLE_OR_IMAGE_RE.search(question.enunciado or ""))
+        has_image = bool(question.imagens)
+        if not has_table and not has_image:
+            warnings.append(
+                "Tipo 'complete_table' sem imagem nem tabela no enunciado: "
+                "quadro de opções provavelmente ausente."
+            )
+
+    return errors, warnings
+
+
 def _validate_numbering_sequence(questions: list[Question]) -> dict[str, list[str]]:
     errors_by_id: dict[str, list[str]] = {}
     top_level_ids = [question for question in questions if question.subitem is None]
@@ -788,10 +830,11 @@ def _validate_numbering_sequence(questions: list[Question]) -> dict[str, list[st
     return errors_by_id
 
 
-def validate_questions(raw_json_path: Path) -> tuple[Path, Path]:
+def validate_questions(raw_json_path: Path, materia: str = "") -> tuple[Path, Path]:
     raw_json_path = raw_json_path.resolve()
     output_dir = raw_json_path.parent
     images_root = output_dir
+    is_pt = "portugu" in (materia or "").lower() or "portugu" in str(raw_json_path).lower()
     questions = load_questions(raw_json_path)
     questions = sorted(questions, key=_item_sort_key)
     trace_map = _load_trace_map(raw_json_path)
@@ -890,12 +933,19 @@ def validate_questions(raw_json_path: Path) -> tuple[Path, Path]:
         warnings.extend(alt_warnings)
         errors.extend(_validate_enunciado_contamination(question))
         warnings.extend(_validate_enunciado_fused_prefix(question))
-        latex_errors, latex_warnings = _validate_latex_leaks(question)
-        errors.extend(latex_errors)
-        warnings.extend(latex_warnings)
-        math_errors, math_warnings = _validate_math_syntax(question)
-        errors.extend(math_errors)
-        warnings.extend(math_warnings)
+        # Validações LaTeX — apenas para Matemática
+        if not is_pt:
+            latex_errors, latex_warnings = _validate_latex_leaks(question)
+            errors.extend(latex_errors)
+            warnings.extend(latex_warnings)
+            math_errors, math_warnings = _validate_math_syntax(question)
+            errors.extend(math_errors)
+            warnings.extend(math_warnings)
+        else:
+            # Validações específicas de Português
+            pt_errors, pt_warnings = _validate_portugues_tipos(question)
+            errors.extend(pt_errors)
+            warnings.extend(pt_warnings)
         choice_errors, choice_warnings = _validate_choice_precision(question)
         errors.extend(choice_errors)
         warnings.extend(choice_warnings)

@@ -7,11 +7,15 @@ resolucoes_alternativas em cada questão.
 
 Saída: questoes_final.json no directório de questoes_aprovadas.json.
 
-Itens sem correspondência nos critérios ficam marcados com observação.
+Itens sem correspondência nos critérios, com tipo divergente ou com suspeita de
+contaminação são excluídos de questoes_final.json e gravados em
+questoes_merge_pendente.json. Se houver pendentes e force=False, o processo
+termina com código 1 (o MCP não transiciona para cc_merged).
 """
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 from .schemas import (
@@ -21,9 +25,6 @@ from .schemas import (
     load_criterios,
     load_questions,
 )
-from .module_preview import generate_preview
-
-
 _ITEM_HEADING_RE = re.compile(r"(?m)^#{0,4}\s*(\d{1,2}(?:\.\d+)?)\.(?:[ \t]*\.)?[ \t]+\d+\s*pontos\b")
 _FOREIGN_ITEM_REF_RE = re.compile(r"\b(\d{1,2}(?:\.\d+)?)\.\s+\d+\s*pontos\b", re.IGNORECASE)
 
@@ -63,15 +64,23 @@ def _looks_contaminated_for_item(question: Question, criterio: CriterioRaw) -> l
     return issues
 
 
-def merge_cc(criterios_path: Path, questoes_path: Path) -> Path:
+def merge_cc(criterios_path: Path, questoes_path: Path, force: bool = False) -> Path:
     """
     Junta criterios_aprovados.json + questoes_aprovadas.json por id_item.
+
+    Questões sem critério correspondente, com tipo divergente ou com suspeita
+    de contaminação são excluídas de questoes_final.json e gravadas em
+    questoes_merge_pendente.json.
+
+    Se force=False (padrão) e existirem itens pendentes, termina com sys.exit(1)
+    para que o MCP não transicione para cc_merged.
 
     Devolve o caminho do questoes_final.json gerado.
     """
     criterios_path = criterios_path.resolve()
     questoes_path  = questoes_path.resolve()
     output_path    = questoes_path.parent / "questoes_final.json"
+    pendente_path  = questoes_path.parent / "questoes_merge_pendente.json"
 
     criterios: list[CriterioRaw] = load_criterios(criterios_path)
     questoes:  list[Question]    = load_questions(questoes_path)
@@ -81,10 +90,25 @@ def merge_cc(criterios_path: Path, questoes_path: Path) -> Path:
         c.id_item.lower().strip(): c for c in criterios
     }
 
-    n_merged  = 0
-    n_missing = 0
+    final_items:   list[Question] = []  # vai para questoes_final.json
+    pendente_items: list[Question] = []  # vai para questoes_merge_pendente.json
+
+    n_merged       = 0
+    n_context_stem = 0
+    n_missing      = 0
+    n_blocked      = 0
 
     for q in questoes:
+        # context_stem: inclui directamente sem merge de CC (não precisam de critério)
+        if q.tipo_item == "context_stem":
+            q.observacoes = list(q.observacoes) + [
+                "cc_merge: critério ignorado porque o item é apenas contexto/stem."
+            ]
+            final_items.append(q)
+            n_context_stem += 1
+            print(f"[cc_merge] ⏭️  {q.id_item} — context_stem, incluído sem merge")
+            continue
+
         key = (q.id_item or str(q.numero_questao)).lower().strip()
         criterio = criterio_map.get(key)
         # Fallback: tentar sem o prefixo de grupo, mas só para itens do Grupo II
@@ -94,31 +118,24 @@ def merge_cc(criterios_path: Path, questoes_path: Path) -> Path:
             criterio = criterio_map.get(plain_key)
 
         if criterio is None:
-            obs = list(q.observacoes) + [
+            q.observacoes = list(q.observacoes) + [
                 f"cc_merge: sem critério correspondente para id_item '{q.id_item}'"
             ]
-            q.observacoes = obs
+            pendente_items.append(q)
             n_missing += 1
-            print(f"[cc_merge] ⚠️  {q.id_item} — sem critério")
-            continue
-
-        # Não fundir critérios em stems/contextos estruturais.
-        if q.tipo_item == "context_stem":
-            q.observacoes = list(q.observacoes) + [
-                "cc_merge: critério ignorado porque o item é apenas contexto/stem."
-            ]
-            print(f"[cc_merge] ⏭️  {q.id_item} — context_stem, merge ignorado")
+            print(f"[cc_merge] ❌ {q.id_item} — sem critério (excluído de questoes_final.json)")
             continue
 
         # Verificar coerência de tipo entre critério e questão
-        tipo_mismatch = criterio.tipo != q.tipo_item
-        if tipo_mismatch:
+        if criterio.tipo != q.tipo_item:
             aviso = (
                 f"cc_merge: tipo do critério ('{criterio.tipo}') diverge do tipo "
                 f"da questão ('{q.tipo_item}') — merge bloqueado"
             )
             q.observacoes = list(q.observacoes) + [f"AVISO: {aviso}"]
-            print(f"[cc_merge] ⚠️  {q.id_item} — tipo mismatch: criterio={criterio.tipo} questao={q.tipo_item}")
+            pendente_items.append(q)
+            n_blocked += 1
+            print(f"[cc_merge] ❌ {q.id_item} — tipo mismatch: criterio={criterio.tipo} questao={q.tipo_item} (excluído)")
             continue
 
         contamination_issues = _looks_contaminated_for_item(q, criterio)
@@ -126,35 +143,61 @@ def merge_cc(criterios_path: Path, questoes_path: Path) -> Path:
             q.observacoes = list(q.observacoes) + [
                 f"AVISO: cc_merge bloqueado por possível contaminação: {'; '.join(contamination_issues)}"
             ]
-            print(f"[cc_merge] ⚠️  {q.id_item} — possível contaminação, merge bloqueado")
+            pendente_items.append(q)
+            n_blocked += 1
+            print(f"[cc_merge] ❌ {q.id_item} — possível contaminação (excluído)")
             continue
 
+        # Merge bem-sucedido
         # Só copiar resposta_correta se o critério for MC; caso contrário preservar
         if criterio.tipo == "multiple_choice":
             q.resposta_correta = criterio.resposta_correta or q.resposta_correta
         q.solucao               = criterio.solucao
         q.criterios_parciais    = criterio.criterios_parciais
         q.resolucoes_alternativas = criterio.resolucoes_alternativas
+        final_items.append(q)
         n_merged += 1
-        icon = "⚠️ " if tipo_mismatch else "✅"
-        print(f"[cc_merge] {icon} {q.id_item} ← {criterio.tipo}")
+        print(f"[cc_merge] ✅ {q.id_item} ← {criterio.tipo}")
 
-    dump_questions(output_path, questoes)
-    preview_path = generate_preview(output_path, output_path.parent / "prova_preview.html")
+    # Gravar questoes_final.json apenas com itens fundidos + context_stems
+    dump_questions(output_path, final_items)
 
-    print(f"\n[cc_merge] {n_merged} questões com critérios · {n_missing} sem correspondência")
+    # Gravar questoes_merge_pendente.json (ou limpar se não há pendentes)
+    if pendente_items:
+        dump_questions(pendente_path, pendente_items)
+    elif pendente_path.exists():
+        pendente_path.unlink()
+
+    print(
+        f"\n[cc_merge] {n_merged} questões fundidas · "
+        f"{n_context_stem} context_stems · "
+        f"{n_missing} sem critério · "
+        f"{n_blocked} bloqueados"
+    )
     print(f"[cc_merge] → {output_path}")
-    print(f"[cc_merge] 🔍 Preview HTML gerado → {preview_path}")
+    if pendente_items:
+        print(f"[cc_merge] ⚠️  {len(pendente_items)} item(ns) excluídos → {pendente_path}")
 
-    # Checagem de categorização
+    # Checagem de categorização (apenas nos itens finais não-context_stem)
     sem_cat = [
-        q.id_item for q in questoes
-        if not q.tema or q.tema.strip().lower() in {"", "por categorizar"}
+        q.id_item for q in final_items
+        if q.tipo_item != "context_stem"
+        and (not q.tema or q.tema.strip().lower() in {"", "por categorizar"})
     ]
     if sem_cat:
         print(f"\n[cc_merge] ⚠️  {len(sem_cat)} questão(ões) SEM CATEGORIZAÇÃO: {sem_cat}")
         print("[cc_merge] ℹ️  Execute a categorização antes do upload.")
     else:
         print("[cc_merge] ✅ Todas as questões estão categorizadas.")
+
+    # Bloquear se há pendentes e não é força
+    if pendente_items and not force:
+        print(
+            f"\n[cc_merge] ❌ BLOQUEADO: {len(pendente_items)} item(ns) sem critério ou com merge "
+            f"bloqueado foram excluídos de questoes_final.json.\n"
+            f"   Corrija os critérios em criterios_aprovados.json e re-execute o merge.\n"
+            f"   Use --force para incluir apenas os itens fundidos e ignorar os pendentes."
+        )
+        sys.exit(1)
 
     return output_path

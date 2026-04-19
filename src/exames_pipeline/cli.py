@@ -5,7 +5,6 @@ from pathlib import Path
 
 from .cc_extract import extract_cc
 from .cc_merge import merge_cc
-from .cc_preview import run_cc_preview
 from .cc_validate import validate_criterios
 from .config import load_settings
 from .module_categorize import categorize_questions
@@ -18,7 +17,6 @@ from .module_validate import validate_questions
 from .pdf_parser import extract_pdf
 from .utils import infer_fonte_from_path
 from .supabase_client import upload_to_supabase
-from .supabase_preview import run_supabase_preview
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -111,16 +109,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Simula o upload sem enviar dados — mostra o que seria feito.",
     )
 
-    sb_preview_parser = subparsers.add_parser(
-        "supabase-preview",
-        help="Preview editável puxando questões diretamente do Supabase.",
-    )
-    sb_preview_parser.add_argument(
-        "--fonte", type=str, default=None,
-        help='Filtrar por fonte (ex: "Exame Nacional, Matemática A, 1.ª Fase, 2024").',
-    )
-    sb_preview_parser.add_argument("--port", type=int, default=8797)
-
     preview_parser = subparsers.add_parser("preview", help="Abre preview interativo das questões aprovadas.")
     preview_parser.add_argument("approved_json_path", type=Path)
     preview_parser.add_argument(
@@ -158,22 +146,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cc_validate_parser.add_argument("criterios_raw_path", type=Path)
 
-    cc_preview_parser = subparsers.add_parser(
-        "cc-preview",
-        help="CC: abre preview interativo para seleccionar itens para fallback.",
-    )
-    cc_preview_parser.add_argument("criterios_aprovados_path", type=Path)
-    cc_preview_parser.add_argument(
-        "--port", type=int, default=8799,
-        help="Porta do servidor HTTP local (default: 8799).",
-    )
-
     cc_merge_parser = subparsers.add_parser(
         "cc-merge",
         help="CC: junta criterios_aprovados.json com questoes_aprovadas.json.",
     )
     cc_merge_parser.add_argument("criterios_aprovados_path", type=Path)
     cc_merge_parser.add_argument("questoes_aprovadas_path", type=Path)
+    cc_merge_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Incluir apenas os itens fundidos e ignorar pendentes (sem critério/mismatch/contaminação).",
+    )
 
     return parser
 
@@ -298,10 +281,6 @@ def main() -> None:
         print(output)
         return
 
-    if args.command == "supabase-preview":
-        run_supabase_preview(settings, port=args.port, fonte=args.fonte)
-        return
-
     if args.command == "preview":
         output = run_preview(args.approved_json_path, args.output, port=args.port)
         print(output)
@@ -321,16 +300,8 @@ def main() -> None:
         print(rejected_path)
         return
 
-    if args.command == "cc-preview":
-        output = run_cc_preview(
-            args.criterios_aprovados_path,
-            port=args.port,
-        )
-        print(output)
-        return
-
     if args.command == "cc-merge":
-        output = merge_cc(args.criterios_aprovados_path, args.questoes_aprovadas_path)
+        output = merge_cc(args.criterios_aprovados_path, args.questoes_aprovadas_path, force=args.force)
         print(output)
         return
 

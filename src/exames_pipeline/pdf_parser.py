@@ -23,6 +23,9 @@ def _maybe_repair_ocr(settings: "Settings", pdf_path: "Path", markdown_path: "Pa
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 LATEX_FRAC_PATTERN = re.compile(r"\\frac\s*\{\s*([^{}]+?)\s*\}\s*\{\s*([^{}]+?)\s*\}")
+# Artefacto de encoding de PDF: parênteses com ToUnicode errado.
+# "( → `, ,`  e  ) → `^ h`": ", , 0 3 6 ^ h" → "(0, 3, 6)" / "50 ^ h" → "(50)"
+_PAREN_ENCODE_RE = re.compile(r"((?:,\s*)+)?(\d[\d\s]*?)\s*\^\s+h\b")
 LATEX_SUP_PATTERN = re.compile(r"(?P<base>(?:\\[A-Za-z]+|[A-Za-z0-9)\]]))\s*\^\s*\{\s*(?P<exp>[^{}]+?)\s*\}")
 LATEX_SUB_PATTERN = re.compile(r"(?P<base>(?:\\[A-Za-z]+|[A-Za-z0-9)\]]))\s*_\s*\{\s*(?P<sub>[^{}]+?)\s*\}")
 LATEX_CMD_SPACE_PATTERN = re.compile(r"\\(?P<cmd>[A-Za-z]+)\s+\{")
@@ -608,7 +611,17 @@ _IN_BEFORE_ARTIGO_RE = re.compile(r"\\in\s+(?=um[a]?\b|o\b|os\b|a\b|as\b)")
 _IN_DEFAULT_RE = re.compile(r"\\in\b")
 
 
+def _fix_paren_encoding(text: str) -> str:
+    def _rebuild(m: re.Match) -> str:
+        commas = m.group(1) or ""
+        nums = m.group(2).split()
+        inner = ", ".join(nums) if commas.strip() else "".join(nums)
+        return f"({inner})"
+    return _PAREN_ENCODE_RE.sub(_rebuild, text)
+
+
 def _normalize_text_artifacts(markdown_text: str) -> str:
+    normalized = _fix_paren_encoding(markdown_text)
     replacements = {
         "I, I, II e IV": "I, II, III e IV",
         "Il valores": "II valores",
@@ -621,7 +634,6 @@ def _normalize_text_artifacts(markdown_text: str) -> str:
         "2 \\times ^{ 4 } A_{3}": "2 \\times ^{4} A_{3}",
         "2 \\times ^{ 4 } C_{3}": "2 \\times ^{4} C_{3}",
     }
-    normalized = markdown_text
     for old, new in replacements.items():
         normalized = normalized.replace(old, new)
 
@@ -748,6 +760,69 @@ def _has_normalized_output(markdown_path: Path, images_dir: Path) -> bool:
     if markdown_path.exists() and markdown_path.stat().st_size > 0:
         return True
     return any(images_dir.iterdir())
+
+
+def normalize_mineru_workspace(ws_dir: Path) -> Path | None:
+    """Normaliza o output do MinerU num workspace sem conhecer o pdf_path original.
+
+    Útil quando o MinerU foi corrido manualmente: evita que o utilizador tenha de
+    localizar e copiar prova.md + images/ à mão — independentemente do nome do PDF
+    ou da profundidade da estrutura gerada pelo MinerU.
+
+    Procura recursivamente qualquer .md gerado pelo MinerU (excluindo prova.md),
+    aplica as mesmas normalizações do fluxo automático e copia as imagens para
+    ``ws_dir/imagens_extraidas/``.
+
+    Retorna ``ws_dir/prova.md`` se encontrou e normalizou, ``None`` se não havia
+    output do MinerU no workspace.
+    """
+    markdown_path = ws_dir / "prova.md"
+    images_dir = ensure_dir(ws_dir / "imagens_extraidas")
+
+    candidates = [p for p in ws_dir.rglob("*.md") if p.name != "prova.md"]
+    if not candidates:
+        return None
+
+    # Preferir ficheiros menos aninhados; em empate, nome mais longo (mais específico)
+    candidates.sort(key=lambda p: (len(p.parts), -len(p.name)))
+    generated_markdown = candidates[0]
+
+    content_list_path = next(iter(sorted(ws_dir.rglob("*_content_list.json"))), None)
+    preprocessed_content_list = _find_preprocessed_content_list(ws_dir)
+
+    content_entries = _load_content_list(content_list_path)
+    preprocessed_entries = _load_content_list(preprocessed_content_list)
+
+    markdown_text = ""
+    if content_entries:
+        markdown_text = _build_markdown_from_content_list(content_entries, preprocessed_entries)
+    if not markdown_text:
+        markdown_text = generated_markdown.read_text(encoding="utf-8")
+
+    markdown_text = _normalize_latex_math(markdown_text)
+    markdown_text = _normalize_question_markers(markdown_text)
+    markdown_text = _normalize_text_artifacts(markdown_text)
+    markdown_text = _strip_formulario_section(markdown_text)
+    markdown_path.write_text(_rewrite_markdown_image_paths(markdown_text), encoding="utf-8")
+
+    referenced_image_names = set(_extract_markdown_image_names(markdown_text))
+    source_root = generated_markdown.parent
+    image_candidates = {
+        f.name: f
+        for f in source_root.rglob("*")
+        if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS
+    }
+    for image_name in sorted(referenced_image_names):
+        image_file = image_candidates.get(image_name)
+        if image_file is None:
+            continue
+        destination = images_dir / image_file.name
+        if image_file.resolve() == destination.resolve():
+            continue
+        shutil.copyfile(image_file, destination)
+
+    print(f"[normalize_workspace] ✅ prova.md normalizado a partir de {generated_markdown}")
+    return markdown_path
 
 
 def extract_pdf(

@@ -6,14 +6,34 @@ import re
 import subprocess
 
 
-# Detetar cabeçalhos de grupo: "# Grupo I", "## GRUPO II", "# \* GRUPO III", etc.
-# O \* antes de GRUPO é artefacto OCR do MinerU em alguns PDFs.
+# Detetar cabeçalhos de grupo: "# Grupo I", "## GRUPO II", "# Grupo III", etc.
 _GRUPO_HEADING_RE = re.compile(
-    r"(?m)^#{1,3}\s*(?:\\\*\s*)?[Gg][Rr][Uu][Pp][Oo]\s+(?P<num>I{1,3}|IV|VI{0,3}|IX|X)\b"
+    r"(?m)^#{1,3}\s*[Gg][Rr][Uu][Pp][Oo]\s+(?P<num>I{1,3}|IV|VI{0,3}|IX|X)\b"
 )
-# Detetar cabeçalhos de parte: "# PARTE A", "# Parte B", etc.
+# Detetar cabeçalhos de PARTE (Português): "## PARTE A", "## Parte B", etc.
 _PARTE_HEADING_RE = re.compile(
-    r"(?m)^#{1,3}\s+[Pp][Aa][Rr][Tt][Ee]\s+[A-Z]\b"
+    r"(?m)^#{1,3}\s*[Pp][Aa][Rr][Tt][Ee]\s+(?P<letra>[A-C])\b"
+)
+# Notas de rodapé do excerto: "¹ calamistrar – tornar crespo"  ou  "1 calamistrar – ..."
+_NOTA_RODAPE_RE = re.compile(
+    r"(?m)^(?P<num>[¹²³⁴⁵⁶⁷⁸⁹\d]{1,2})\s+(?P<texto>[A-ZÁÀÂÃÉÊÍÓÔÕÚÇa-záàâãéêíóôõúç].{5,}?)$"
+)
+# Marcador de item opcional (asterisco, ★, * no início da linha de questão)
+_OPCIONAL_MARKER_RE = re.compile(r"^\s*(?:\*\s*|\★\s*|\\bigstar\s*|\$\\(?:star|bigstar|ast)\$\s*)")
+# Quadros de completar — linha iniciada por "(a)" ou com "a)" ... "b)" em Português PT
+_COMPLETE_TABLE_STEM_RE = re.compile(
+    r"\b(?:complete\s+as?\s+afirma[çc][oõ]es|selecione\s+a\s+op[çc][aã]o\s+adequada)\b",
+    re.IGNORECASE,
+)
+# Multi-select (as três afirmações verdadeiras, etc.)
+_MULTI_SELECT_STEM_RE = re.compile(
+    r"\b(?:tr[êe]s\s+afirma[çc][oõ]es\s+verdadeiras|identifique\s+as\s+(?:tr[êe]s|duas|quatro))\b",
+    re.IGNORECASE,
+)
+# Dissertação (Grupo III)
+_ESSAY_STEM_RE = re.compile(
+    r"\b(?:num\s+texto\s+de\s+opini[aã]o|escreva\s+uma\s+(?:breve\s+)?exposi[çc][aã]o|redija\s+um\s+texto)\b",
+    re.IGNORECASE,
 )
 # Mapa de numeral romano → string canónica
 _ROMANO_CANON = {"I": "I", "II": "II", "III": "III", "IV": "IV", "V": "V",
@@ -22,10 +42,6 @@ _ROMANO_CANON = {"I": "I", "II": "II", "III": "III", "IV": "IV", "V": "V",
 IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 QUESTION_HEADING_PATTERN = re.compile(
     r"(?m)^(?:\$\\(?:star|bigstar|ast)\$\s*|\$?\\pm\s*|\\[*]\s*|[\*\u00b1•-]\s*)?(?:Quest[aã]o\s+)?(?P<label>\d{1,3}(?:\.\d{1,2})?)(?:\s*\.\s*\$?\s+|(?=[A-ZÁÉÍÓÚÀÂÃÇ]))"
-)
-# Padrão para provas com numeração prefixada por grupo romano: "I-1. Enunciado"
-_ROMAN_PREFIX_QUESTION_RE = re.compile(
-    r"(?m)^(?:I{1,3}|IV|VI{0,3}|IX|X)-(?P<label>\d{1,3}(?:\.\d{1,2})?)\.?\s+(?=[A-ZÁÉÍÓÚÀÂÃÇO])"
 )
 INLINE_SUBHEADING_PATTERN = re.compile(
     r"(?P<prefix>\s|[\*\u2605])(?P<label>\d{1,3}\.\d{1,2})\.\s+"
@@ -81,7 +97,7 @@ class MarkdownQuestionBlock:
     inferred_type: str = "unknown"
     grupo: str = ""          # "I", "II", … — vazio quando a prova não tem grupos
     is_context_stem: bool = False
-    section_context: str = ""  # texto da secção (PARTE A/B/C, GRUPO II) que precede as questões
+    pool_opcional: str = ""  # "I-opt", "II-opt" — vazio = item obrigatório
 
 
 _MATERIA_CODES: dict[str, str] = {
@@ -104,11 +120,12 @@ _FASE_CODES: dict[str, str] = {
     "F2": "2.ª Fase",
     "FE": "Fase Especial",
     "FR": "Recurso",
+    "EE": "Época Especial",
 }
 
-# EX-MatA635-F1-2024_net  ou  EX-MatA635-F1-2024-CC-VD
+# EX-MatA635-F1-2024_net  ou  EX-MatA635-EE-2021_net  ou  EX-MatA635-F1-2024-CC-VD
 _FONTE_PATTERN = re.compile(
-    r"EX-(?P<materia>[A-Za-z]+)\d*-(?P<fase>F\w+)-(?P<ano>\d{4})",
+    r"EX-(?P<materia>[A-Za-z]+)\d*-(?P<fase>(?:EE|F\w+))-(?P<ano>\d{4})",
     re.IGNORECASE,
 )
 
@@ -231,9 +248,42 @@ def extract_inferred_alternatives(markdown_block: str) -> list[tuple[str, str]]:
 def infer_question_type(markdown_block: str) -> str:
     if len(extract_inferred_alternatives(markdown_block)) == 4:
         return "multiple_choice"
+    if _ESSAY_STEM_RE.search(markdown_block):
+        return "essay"
+    if _MULTI_SELECT_STEM_RE.search(markdown_block):
+        return "multi_select"
+    if _COMPLETE_TABLE_STEM_RE.search(markdown_block):
+        return "complete_table"
     if COMPLETION_PATTERN.search(markdown_block):
         return "completion"
     return "open_response"
+
+
+def is_optional_marker(line: str) -> bool:
+    """Verifica se uma linha começa com um marcador de item opcional (★, *)."""
+    return bool(_OPCIONAL_MARKER_RE.match(line))
+
+
+def extract_notas_rodape(text: str) -> list[dict]:
+    """Extrai notas de rodapé de um bloco de texto (após o excerto/poema).
+
+    Devolve lista de {"numero": "1", "texto": "calamistrar – tornar crespo"}.
+    """
+    notas = []
+    for m in _NOTA_RODAPE_RE.finditer(text):
+        # Normalizar número (converter superscript unicode para algarismo)
+        raw_num = m.group("num")
+        num = raw_num.translate(str.maketrans("¹²³⁴⁵⁶⁷⁸⁹", "123456789"))
+        notas.append({"numero": num, "texto": m.group("texto").strip()})
+    return notas
+
+
+def detect_partes(markdown_text: str) -> list[tuple[int, str]]:
+    """Retorna lista de (char_offset, letra_parte) para os cabeçalhos PARTE A/B/C."""
+    return [
+        (m.start(), m.group("letra").upper())
+        for m in _PARTE_HEADING_RE.finditer(markdown_text)
+    ]
 
 
 def block_requires_multimodal(markdown_block: str, context_images: list[str] | None = None) -> bool:
@@ -801,61 +851,6 @@ def _redistribute_images_by_reference(
     return blocks
 
 
-def _assign_section_contexts(
-    markdown_text: str,
-    blocks: list[MarkdownQuestionBlock],
-) -> list[MarkdownQuestionBlock]:
-    """Associa textos de secção (PARTE A/B/C, GRUPO II/III) como contexto de cada questão.
-
-    Para cada secção delimitada por cabeçalhos # PARTE X ou # GRUPO X, extrai o texto
-    que precede a primeira questão numerada e atribui-o a `section_context` de todos
-    os blocos dessa secção que não sejam context_stem nem já tenham contexto de item pai.
-    Só activa quando o texto da secção tem ≥ 150 caracteres (evita cabeçalhos vazios).
-    """
-    section_starts = sorted(
-        [m.start() for m in _GRUPO_HEADING_RE.finditer(markdown_text)]
-        + [m.start() for m in _PARTE_HEADING_RE.finditer(markdown_text)]
-    )
-    if not section_starts:
-        return blocks
-
-    lines = markdown_text.splitlines(keepends=True)
-    cumlen = [0]
-    for line in lines:
-        cumlen.append(cumlen[-1] + len(line))
-
-    def line_to_char(line_num: int) -> int:
-        idx = max(0, line_num - 1)
-        return cumlen[min(idx, len(cumlen) - 1)]
-
-    block_chars = [line_to_char(b.source_span.get("line_start", 1)) for b in blocks]
-
-    sections: list[tuple[int, int, str]] = []
-    for i, sec_start in enumerate(section_starts):
-        sec_end = section_starts[i + 1] if i + 1 < len(section_starts) else len(markdown_text)
-        first_q_char = sec_end
-        for char_pos in block_chars:
-            if sec_start <= char_pos < sec_end:
-                first_q_char = min(first_q_char, char_pos)
-        ctx = markdown_text[sec_start:first_q_char].strip()
-        if len(ctx) >= 150:
-            sections.append((sec_start, sec_end, ctx))
-
-    context_stem_numbers: set[int] = {b.numero_principal for b in blocks if b.is_context_stem}
-
-    for block, char_pos in zip(blocks, block_chars):
-        if block.is_context_stem:
-            continue
-        if block.numero_principal in context_stem_numbers:
-            continue
-        for sec_start, sec_end, ctx in sections:
-            if sec_start <= char_pos < sec_end:
-                block.section_context = ctx
-                break
-
-    return blocks
-
-
 def split_markdown_question_blocks(markdown_text: str) -> list[MarkdownQuestionBlock]:
     # Fix OCR artefact: subitem heading fused inline after other content.
     # e.g. "...fórmula \* 13.1. Qual é..." → "...fórmula\n\n13.1. Qual é..."
@@ -884,8 +879,7 @@ def split_markdown_question_blocks(markdown_text: str) -> list[MarkdownQuestionB
     )
     markdown_text = re.sub(r"(\\right\.)\s*\}(\s*\n\$\$)", r"\1\2", markdown_text)
 
-    roman_matches = list(_ROMAN_PREFIX_QUESTION_RE.finditer(markdown_text))
-    matches = roman_matches if roman_matches else list(QUESTION_HEADING_PATTERN.finditer(markdown_text))
+    matches = list(QUESTION_HEADING_PATTERN.finditer(markdown_text))
     if not matches:
         stripped = markdown_text.strip()
         if not stripped:
@@ -972,7 +966,44 @@ def split_markdown_question_blocks(markdown_text: str) -> list[MarkdownQuestionB
                 if not block.item_id.startswith(block.grupo + "-"):
                     block.item_id = f"{block.grupo}-{block.item_id}"
 
-    blocks = _assign_section_contexts(markdown_text, blocks)
+    # ── Marcar itens opcionais (★ / * antes do número de questão) ────────────
+    # O MinerU pode renderizar ★ como "$\bigstar$", "★" ou "*".
+    # Procuramos o marcador na primeira linha do raw_markdown de cada bloco.
+    _opcional_pools: dict[str, int] = {}  # grupo → contador de itens opcionais
+    for block in blocks:
+        first_line = block.raw_markdown.split("\n")[0]
+        if is_optional_marker(first_line):
+            pool_key = f"{block.grupo}-opt" if block.grupo else "opt"
+            _opcional_pools.setdefault(pool_key, 0)
+            block.pool_opcional = pool_key
+
+    # ── Atribuir PARTE (A/B/C) para Grupos com subdivisões PT ────────────────
+    parte_breakpoints = detect_partes(markdown_text)
+    if parte_breakpoints:
+        lines = markdown_text.splitlines(keepends=True)
+        for block in blocks:
+            pos = block.source_span.get("line_start", 0)
+            char_pos = sum(len(l) for l in lines[: pos - 1]) if pos > 1 else 0
+            parte_ativa = ""
+            for bp_pos, bp_letra in parte_breakpoints:
+                if bp_pos <= char_pos:
+                    parte_ativa = bp_letra
+            if parte_ativa:
+                # Prefixar id_item com a PARTE: "I-1" → "I-A-1"
+                # Só aplicar se o id_item ainda não contém a parte
+                parts_of_id = block.item_id.split("-")
+                has_parte = (
+                    len(parts_of_id) >= 2 and parts_of_id[1] in ("A", "B", "C")
+                ) or (
+                    len(parts_of_id) >= 1 and parts_of_id[0] in ("A", "B", "C")
+                )
+                if not has_parte:
+                    if block.grupo and block.item_id.startswith(block.grupo + "-"):
+                        suffix = block.item_id[len(block.grupo) + 1:]
+                        block.item_id = f"{block.grupo}-{parte_ativa}-{suffix}"
+                    else:
+                        block.item_id = f"{parte_ativa}-{block.item_id}"
+
     return blocks
 
 

@@ -10,6 +10,7 @@ O utilizador pode:
 """
 from __future__ import annotations
 
+import copy
 import html
 import http.server
 import json
@@ -19,6 +20,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
+from . import overlay as overlay_mod
 from .schemas import Question, dump_questions, load_questions
 
 _DEFAULT_PORT = 8798
@@ -30,12 +32,14 @@ _INLINE_MATH_RE = re.compile(r"\$(?!\$)(.+?)\$", re.DOTALL)
 _BOLD_RE        = re.compile(r"\*\*(.+?)\*\*")
 _BULLET_RE      = re.compile(r"(?m)^[•\-]\s+(.+)$")
 _IMAGE_MD_RE    = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+_TABLE_RE       = re.compile(r"<table[\s\S]*?</table>", re.IGNORECASE)
 
 
 def _md_to_html(text: str) -> str:
     """Converte Markdown/LaTeX para HTML com URLs de imagem relativas ao servidor."""
     block_math: list[str] = []
     inline_math: list[str] = []
+    tables: list[str] = []
 
     def save_block(m: re.Match) -> str:
         block_math.append(m.group(0))
@@ -45,6 +49,12 @@ def _md_to_html(text: str) -> str:
         inline_math.append(m.group(0))
         return f"\x00IM{len(inline_math)-1}\x00"
 
+    def save_table(m: re.Match) -> str:
+        tables.append(m.group(0))
+        return f"\x00TB{len(tables)-1}\x00"
+
+    # Guardar tabelas antes do escape (são HTML literal do OCR)
+    text = _TABLE_RE.sub(save_table, text)
     text = _BLOCK_MATH_RE.sub(save_block, text)
     text = _INLINE_MATH_RE.sub(save_inline, text)
     text = html.escape(text)
@@ -70,7 +80,7 @@ def _md_to_html(text: str) -> str:
         p = p.strip()
         if not p:
             continue
-        if p.startswith(("<ul>", "\x00BM")):
+        if p.startswith(("<ul>", "\x00BM", "\x00TB")):
             parts.append(p)
         elif "<ul>" in p:
             # Parágrafo misto: texto + lista — separar para evitar <p><ul></p>
@@ -92,10 +102,29 @@ def _md_to_html(text: str) -> str:
                             f'<span class="math-block">\\[{m[2:-2]}\\]</span>')
     for i, m in enumerate(inline_math):
         text = text.replace(f"\x00IM{i}\x00", f'\\({m[1:-1]}\\)')
+    for i, t in enumerate(tables):
+        text = text.replace(f"\x00TB{i}\x00",
+                            f'<div class="ocr-table-wrap">{t}</div>')
     return text
 
 
 # ── Badges ────────────────────────────────────────────────────────────────────
+
+def _override_badge(field: str, overrides: dict[str, str]) -> str:
+    """Badge colorido se o campo tiver um override activo."""
+    source = overrides.get(field)
+    if source == "human":
+        return (
+            '<span class="override-badge override-human" '
+            'title="Editado manualmente pelo utilizador">✏️ manual</span>'
+        )
+    if source == "agent":
+        return (
+            '<span class="override-badge override-agent" '
+            'title="Editado pelo agente">🤖 agente</span>'
+        )
+    return ""
+
 
 def _status_badge(status: str) -> str:
     colours = {
@@ -113,7 +142,12 @@ def _status_badge(status: str) -> str:
 
 # ── Renderização de questão ───────────────────────────────────────────────────
 
-def _render_question(q: Question, index: int, show_context: bool = True) -> str:
+def _render_question(q: Question, index: int, show_context: bool = True, overrides: dict[str, str] | None = None) -> str:
+    """Renderiza uma questão em HTML.
+
+    overrides: {field: source} onde source é "human" ou "agent".
+    """
+    overrides = overrides or {}
     item_id  = html.escape(q.id_item or str(q.numero_questao))
     tipo     = q.tipo_item or "unknown"
     status   = q.status or "pending_review"
@@ -159,11 +193,25 @@ def _render_question(q: Question, index: int, show_context: bool = True) -> str:
     # ── Contexto pai (enunciado partilhado) ──────────────────────────────────
     contexto_block = ""
     if show_context and q.enunciado_contexto_pai:
-        ctx_html = _md_to_html(q.enunciado_contexto_pai)
+        ctx_raw  = q.enunciado_contexto_pai
+        ctx_html = _md_to_html(ctx_raw)
+        ctx_esc  = html.escape(ctx_raw)
         contexto_block = f"""
   <div class="field-block context-block">
-    <div class="field-label" style="color:#6b7280">Contexto</div>
+    <div class="field-label" style="color:#6b7280">Contexto
+      {_override_badge("enunciado_contexto_pai", overrides)}
+      <button class="edit-btn" onclick="toggleEdit(this)" title="Editar"
+        data-item="{item_id}" data-field="enunciado_contexto_pai">✏️</button>
+    </div>
     <div class="field-text enunciado-text" style="background:#f0f9ff;border-left:3px solid #3b82f6;padding-left:10px">{ctx_html}</div>
+    <div class="edit-area" style="display:none">
+      <textarea class="edit-ta" rows="10">{ctx_esc}</textarea>
+      <div class="edit-actions">
+        <button class="save-btn" onclick="saveEdit(this)"
+          data-item="{item_id}" data-field="enunciado_contexto_pai">Guardar</button>
+        <button class="cancel-btn" onclick="cancelEdit(this)">Cancelar</button>
+      </div>
+    </div>
   </div>"""
 
     # ── Enunciado ────────────────────────────────────────────────────────────
@@ -174,6 +222,7 @@ def _render_question(q: Question, index: int, show_context: bool = True) -> str:
     enunciado_block = f"""
   <div class="field-block">
     <div class="field-label">Enunciado
+      {_override_badge("enunciado", overrides)}
       <button class="edit-btn" onclick="toggleEdit(this)" title="Editar"
         data-item="{item_id}" data-field="enunciado">✏️</button>
     </div>
@@ -189,6 +238,7 @@ def _render_question(q: Question, index: int, show_context: bool = True) -> str:
   </div>"""
 
     # ── Alternativas (MC) ────────────────────────────────────────────────────
+    alts_badge = _override_badge("alternativas", overrides)
     alts_block = ""
     if q.alternativas:
         items_html = ""
@@ -213,13 +263,15 @@ def _render_question(q: Question, index: int, show_context: bool = True) -> str:
         </div>
       </div>
     </li>"""
-        alts_block = f'<ol class="alternatives">{items_html}</ol>'
+        alts_block = f'<div class="alts-label">{alts_badge}</div><ol class="alternatives">{items_html}</ol>'
 
     # ── Critérios de Classificação (CC) ──────────────────────────────────────
     cc_block = ""
     has_cc = q.solucao or q.criterios_parciais or q.resolucoes_alternativas
     if has_cc:
         cc_parts = ""
+        cc_badge     = _override_badge("criterios_parciais", overrides)
+        solucao_badge = _override_badge("solucao", overrides)
 
         # Critérios parciais — cada linha editável
         if q.criterios_parciais:
@@ -257,7 +309,7 @@ def _render_question(q: Question, index: int, show_context: bool = True) -> str:
             add_row_btn = (f'<button class="cc-add-btn" onclick="addCcRow(this)"'
                            f' data-item="{item_id}">+ Adicionar critério</button>')
             cc_parts += (f'<details class="cc-det" open>'
-                         f'<summary>Critérios parciais ({len(q.criterios_parciais)})</summary>'
+                         f'<summary>Critérios parciais ({len(q.criterios_parciais)}) {cc_badge}</summary>'
                          f'<table class="cc-table"><thead><tr><th>Pts</th><th>Descrição</th></tr></thead>'
                          f'<tbody class="cc-tbody">{rows_html}</tbody></table>'
                          f'{add_row_btn}</details>')
@@ -267,7 +319,7 @@ def _render_question(q: Question, index: int, show_context: bool = True) -> str:
                 cc_parts += (f'<details class="cc-det">'
                              f'<summary>Ver resolução completa</summary>'
                              f'<div class="field-block cc-solucao-block">'
-                             f'<div class="field-label">Resolução'
+                             f'<div class="field-label">Resolução {solucao_badge}'
                              f' <button class="edit-btn" onclick="toggleEdit(this)" title="Editar"'
                              f' data-item="{item_id}" data-field="solucao">✏️</button></div>'
                              f'<div class="field-text cc-solucao">{_md_to_html(q.solucao)}</div>'
@@ -577,6 +629,21 @@ h1 {{ font-size: 1.5rem; margin-bottom: .25rem; color: #0f172a; }}
 .pts-cell {{
   font-weight: 700; color: #16a34a; white-space: nowrap; width: 4rem;
 }}
+.ocr-table-wrap {{
+  margin: .6rem 0; overflow-x: auto;
+}}
+.ocr-table-wrap table {{
+  border-collapse: collapse; font-size: .88rem;
+}}
+.ocr-table-wrap table td,
+.ocr-table-wrap table th {{
+  border: 1px solid #cbd5e1; padding: .3rem .65rem;
+  text-align: center; vertical-align: middle;
+}}
+.ocr-table-wrap table tr:first-child td,
+.ocr-table-wrap table th {{
+  background: #f1f5f9; font-weight: 600;
+}}
 .cc-alt-list {{
   list-style: none; display: flex; flex-direction: column; gap: .6rem;
   padding: .65rem .8rem;
@@ -587,7 +654,7 @@ h1 {{ font-size: 1.5rem; margin-bottom: .25rem; color: #0f172a; }}
 .cc-row-content {{
   display: flex; align-items: flex-start; gap: .4rem;
 }}
-.cc-row-content .cc-desc-text {{ flex: 1; }}
+.cc-row-content .cc-desc-text {{ flex: 1; white-space: pre-wrap; }}
 .cc-edit-btn {{
   background: none; border: none; cursor: pointer;
   font-size: .8rem; padding: .1rem .2rem; opacity: .5; flex-shrink: 0;
@@ -671,6 +738,36 @@ h1 {{ font-size: 1.5rem; margin-bottom: .25rem; color: #0f172a; }}
 .approve-upload-btn.already-approved {{
   background: #374151; cursor: default; opacity: .7;
 }}
+
+/* Override badges */
+.override-badge {{
+  font-size: .62rem; font-weight: 700; border-radius: 999px;
+  padding: .1rem .45rem; white-space: nowrap; margin-left: .25rem;
+  vertical-align: middle;
+}}
+.override-human {{
+  background: #eff6ff; color: #2563eb; border: 1px solid #bfdbfe;
+}}
+.override-agent {{
+  background: #fff7ed; color: #ea580c; border: 1px solid #fed7aa;
+}}
+.alts-label {{ margin-bottom: .25rem; }}
+
+/* Update banner */
+.update-banner {{
+  display: none;
+  background: #fef3c7; border: 1px solid #fbbf24;
+  border-radius: 8px; padding: .75rem 1.25rem; margin-bottom: 1.5rem;
+  color: #92400e; font-weight: 600;
+  display: flex; align-items: center; gap: .75rem;
+}}
+.update-banner button {{
+  background: #f59e0b; color: #fff; border: none;
+  border-radius: 6px; padding: .3rem .9rem; font-size: .85rem;
+  font-weight: 600; cursor: pointer; white-space: nowrap;
+}}
+.update-banner button:hover {{ background: #d97706; }}
+.stat-overlay {{ border-color: #bfdbfe; }}
 </style>
 </head>
 <body>
@@ -678,12 +775,18 @@ h1 {{ font-size: 1.5rem; margin-bottom: .25rem; color: #0f172a; }}
   <h1>{title}</h1>
   <p class="subtitle">Preview interativo — Pipeline de Exames Nacionais</p>
   {approved_banner}
+  <div id="update-banner" class="update-banner" style="display:none">
+    ⚠️ O agente fez alterações enquanto tinha esta página aberta.
+    O que você vê pode estar desatualizado.
+    <button onclick="location.reload()">🔄 Recarregar</button>
+  </div>
   <div class="stats">
     <div class="stat"><strong>{total}</strong>questões</div>
     <div class="stat"><strong>{n_mc}</strong>escolha múltipla</div>
     <div class="stat"><strong>{n_or}</strong>resposta dissertativa</div>
     <div class="stat"><strong>{n_err}</strong>com erro</div>
     <div class="stat"><strong>{n_warn}</strong>com aviso</div>
+    {overlay_stat_html}
   </div>
   {questions_html}
 </div>
@@ -953,6 +1056,29 @@ function approveForUpload() {{
 function submitFallback() {{
   return;
 }}
+
+// ── Polling de versão do overlay (10 s) ──────────────────────────────────────
+let _knownOverlayVersion = {initial_version_ms};
+
+function pollOverlayVersion() {{
+  fetch('/version', {{cache: 'no-store'}})
+    .then(r => r.json())
+    .then(data => {{
+      if (data.ts !== _knownOverlayVersion) {{
+        _knownOverlayVersion = data.ts;
+        document.getElementById('update-banner').style.display = 'flex';
+        // Desabilitar aprovação até recarregar
+        const btn = document.getElementById('approveUploadBtn');
+        if (btn && !btn.classList.contains('already-approved')) {{
+          btn.disabled = true;
+          btn.title = 'Recarregue a página para ver as alterações do agente antes de aprovar';
+        }}
+      }}
+    }})
+    .catch(() => {{}});
+}}
+
+setInterval(pollOverlayVersion, 10000);
 </script>
 </body>
 </html>"""
@@ -960,10 +1086,46 @@ function submitFallback() {{
 
 # ── Construção do HTML ────────────────────────────────────────────────────────
 
-def _build_html(approved_path: Path, rejected_path: Path | None, already_approved: bool = False) -> str:
-    questions: list[Question] = load_questions(approved_path)
+def _build_html(
+    approved_path: Path,
+    rejected_path: Path | None,
+    already_approved: bool = False,
+    overlay_data: dict | None = None,
+) -> str:
+    """Constrói o HTML do preview aplicando o overlay sobre a base.
+
+    overlay_data: resultado de overlay_mod.load_overlay(); recarregado se None.
+    """
+    ws_dir       = approved_path.parent
+    overlay_data = overlay_data or overlay_mod.load_overlay(ws_dir)
+    overlay_items = overlay_data.get("items", {})
+
+    # Carrega questões base
+    base_questions: list[Question] = load_questions(approved_path)
     if rejected_path and rejected_path.exists():
-        questions += load_questions(rejected_path)
+        base_questions += load_questions(rejected_path)
+
+    # Aplica overlay: recria Question com campos sobrescritos + regista overrides por item
+    questions: list[Question] = []
+    questions_overrides: list[dict[str, str]] = []  # [{field: source}]
+    for q in base_questions:
+        item_id = q.id_item or str(q.numero_questao)
+        item_overrides = overlay_items.get(item_id, {})
+        if item_overrides:
+            import dataclasses
+            q_dict = copy.deepcopy(dataclasses.asdict(q))
+            for fld, entry in item_overrides.items():
+                q_dict[fld] = entry["value"]
+            try:
+                q = Question.from_dict(q_dict)
+            except Exception:
+                pass  # Se falhar, usa a questão original
+        questions.append(q)
+        questions_overrides.append({fld: entry["source"] for fld, entry in item_overrides.items()})
+
+    # Timestamp do overlay para polling JS (millisegundos)
+    overlay_path = ws_dir / "correcoes_humanas.json"
+    initial_version_ms = int(overlay_path.stat().st_mtime * 1000) if overlay_path.exists() else 0
 
     def _sort_key(s: str) -> tuple:
         # Separa prefixo de grupo ("I", "II") do resto para evitar comparação str/int.
@@ -976,17 +1138,21 @@ def _build_html(approved_path: Path, rejected_path: Path | None, already_approve
         parts      = rest.replace(".", " ").split()
         return (grupo_part,) + tuple(p.zfill(3) if p.isdigit() else p for p in parts)
 
-    questions.sort(key=lambda q: _sort_key(q.id_item or str(q.numero_questao)))
+    # Ordenar mantendo overrides associados
+    paired = list(zip(questions, questions_overrides))
+    paired.sort(key=lambda x: _sort_key(x[0].id_item or str(x[0].numero_questao)))
 
-    # Deduplicar por id_item (evita repetições quando approved + rejected têm sobreposição)
+    # Deduplicar por id_item
     seen_ids: set[str] = set()
-    deduped: list[Question] = []
-    for q in questions:
+    deduped_paired: list[tuple[Question, dict]] = []
+    for q, ov in paired:
         key = q.id_item or str(q.numero_questao)
         if key not in seen_ids:
             seen_ids.add(key)
-            deduped.append(q)
-    questions = deduped
+            deduped_paired.append((q, ov))
+
+    questions  = [q for q, _ in deduped_paired]
+    q_overrides = [ov for _, ov in deduped_paired]
 
     title = (questions[0].fonte if questions else approved_path.parent.name)
     n_mc   = sum(1 for q in questions if q.tipo_item == "multiple_choice")
@@ -996,8 +1162,8 @@ def _build_html(approved_path: Path, rejected_path: Path | None, already_approve
 
     # Subitens: não mostrar contexto pai (o card do context_stem pai já está visível acima)
     questions_html = "\n".join(
-        _render_question(q, i, show_context=(q.subitem is None))
-        for i, q in enumerate(questions, 1)
+        _render_question(q, i, show_context=(q.subitem is None), overrides=ov)
+        for i, (q, ov) in enumerate(zip(questions, q_overrides), 1)
     )
 
     approved_banner = (
@@ -1009,6 +1175,14 @@ def _build_html(approved_path: Path, rejected_path: Path | None, already_approve
         'border-radius:8px;padding:.75rem 1.25rem;margin-bottom:1.5rem;color:#166534;font-weight:600;">'
         '✅ Questões aprovadas para upload — pode usar run_upload() no Claude Code.</div>'
     )
+    # Estatísticas do overlay para o rodapé informativo
+    has_overlay      = bool(overlay_items)
+    n_overridden     = len(overlay_items)
+    overlay_stat_html = (
+        f'<div class="stat stat-overlay"><strong>{n_overridden}</strong>com correcções</div>'
+        if has_overlay else ""
+    )
+
     return _HTML_TEMPLATE.format(
         title=html.escape(title),
         total=len(questions),
@@ -1021,6 +1195,8 @@ def _build_html(approved_path: Path, rejected_path: Path | None, already_approve
         already_approved_js="true" if already_approved else "false",
         already_approved_class=" already-approved" if already_approved else "",
         approve_label="✅ Aprovado para Upload" if already_approved else "✅ Aprovar para Upload",
+        initial_version_ms=initial_version_ms,
+        overlay_stat_html=overlay_stat_html,
     )
 
 
@@ -1032,12 +1208,21 @@ def _make_handler(
     output_path: Path,
     done: threading.Event,
     review_approved_path: Path | None = None,
+    ws_dir: Path | None = None,
 ):
     _review_approved_path = review_approved_path or (approved_path.parent / ".review_approved")
+    _ws_dir = ws_dir or approved_path.parent
+
     class _Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path in ("/", "/index.html"):
-                body = _build_html(approved_path, rejected_path, _review_approved_path.exists()).encode("utf-8")
+                # Recarrega overlay do disco a cada request (pode ter sido alterado pelo agente)
+                current_overlay = overlay_mod.load_overlay(_ws_dir)
+                body = _build_html(
+                    approved_path, rejected_path,
+                    _review_approved_path.exists(),
+                    overlay_data=current_overlay,
+                ).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -1045,6 +1230,8 @@ def _make_handler(
                 self.end_headers()
                 self.wfile.write(body)
                 self.wfile.flush()
+            elif self.path == "/version":
+                self._handle_version()
             elif self.path.startswith("/imagens_extraidas/") or self.path.startswith("/images/"):
                 img_rel  = self.path.lstrip("/")
                 img_path = approved_path.parent / img_rel
@@ -1071,6 +1258,21 @@ def _make_handler(
             self.send_header("Connection", "close")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+
+        def _handle_version(self) -> None:
+            """Devolve o mtime do overlay em ms (para polling JS)."""
+            overlay_path = _ws_dir / "correcoes_humanas.json"
+            ts = int(overlay_path.stat().st_mtime * 1000) if overlay_path.exists() else 0
+            body = json.dumps({"ts": ts}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
             self.wfile.flush()
@@ -1137,6 +1339,15 @@ def _make_handler(
 
         def _handle_approve_final(self) -> None:
             try:
+                # Materializar estado actual (base + overlay) e salvar como snapshot aprovado
+                current_ov = overlay_mod.load_overlay(_ws_dir)
+                base_path  = approved_path  # questoes_final.json ou questoes_aprovadas.json
+                base_data  = json.loads(base_path.read_text(encoding="utf-8"))
+                merged, _  = overlay_mod.apply_overlay(base_data, current_ov)
+                snapshot_path = _ws_dir / "questoes_final.approved_snapshot.json"
+                snapshot_path.write_text(
+                    json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
                 _review_approved_path.touch()
                 self._send_json({"status": "ok"})
             except Exception as exc:
@@ -1174,25 +1385,42 @@ def _make_handler(
         def _handle_edit(self, payload: dict) -> None:
             item_id = str(payload.get("id_item", ""))
             field   = payload.get("field", "")
-            value   = payload.get("value", "").strip()
+            value   = str(payload.get("value", "")).strip()
+
+            SIMPLE_FIELDS = {"enunciado", "solucao", "resposta_correta", "enunciado_contexto_pai"}
+
             try:
-                result = self._find_question(item_id)
-                if result is None:
-                    self._send_json({"status": "error", "error": "item não encontrado"})
-                    return
-                path, data, idx = result
-                if field == "enunciado":
-                    data[idx]["enunciado"] = value
+                if field in SIMPLE_FIELDS:
+                    if self._find_question(item_id) is None:
+                        self._send_json({"status": "error", "error": "item não encontrado"})
+                        return
+                    overlay_mod.set_override(_ws_dir, item_id, field, value, source="human")
+
                 elif field == "alternativa":
+                    result = self._find_question(item_id)
+                    if result is None:
+                        self._send_json({"status": "error", "error": "item não encontrado"})
+                        return
+                    _, base_list, base_idx = result
                     letra = payload.get("letra", "")
-                    for alt in data[idx].get("alternativas", []):
+                    # Obter alternativas efectivas (overlay > base)
+                    current_ov = overlay_mod.load_overlay(_ws_dir)
+                    eff_alts   = overlay_mod.get_effective_field(
+                        base_list, current_ov, item_id, "alternativas", default=None,
+                    )
+                    if eff_alts is None:
+                        eff_alts = base_list[base_idx].get("alternativas", [])
+                    eff_alts = copy.deepcopy(eff_alts or [])
+                    for alt in eff_alts:
                         if alt.get("letra") == letra:
                             alt["texto"] = value
                             break
+                    overlay_mod.set_override(_ws_dir, item_id, "alternativas", eff_alts, source="human")
+
                 else:
                     self._send_json({"status": "error", "error": f"campo desconhecido: {field}"})
                     return
-                path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
                 self._send_json({"status": "ok"})
             except Exception as exc:
                 self._send_json({"status": "error", "error": str(exc)})
@@ -1205,8 +1433,16 @@ def _make_handler(
                 if result is None:
                     self._send_json({"status": "error", "error": "item não encontrado"})
                     return
-                path, data, idx = result
-                criterios = data[idx].setdefault("criterios_parciais", [])
+                _, base_list, base_idx = result
+                # Obter criterios_parciais efectivos (overlay > base)
+                current_ov = overlay_mod.load_overlay(_ws_dir)
+                eff_criterios = overlay_mod.get_effective_field(
+                    base_list, current_ov, item_id, "criterios_parciais", default=None,
+                )
+                if eff_criterios is None:
+                    eff_criterios = base_list[base_idx].get("criterios_parciais", [])
+                criterios = copy.deepcopy(eff_criterios or [])
+
                 if action == "edit":
                     cc_idx = int(payload.get("cc_idx", -1))
                     if cc_idx < 0 or cc_idx >= len(criterios):
@@ -1228,7 +1464,8 @@ def _make_handler(
                 else:
                     self._send_json({"status": "error", "error": f"acção desconhecida: {action}"})
                     return
-                path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+                overlay_mod.set_override(_ws_dir, item_id, "criterios_parciais", criterios, source="human")
                 self._send_json({"status": "ok"})
             except Exception as exc:
                 self._send_json({"status": "error", "error": str(exc)})
@@ -1294,7 +1531,11 @@ def run_preview(
         review_approved_path = approved_path.parent / ".review_approved"
 
     done = threading.Event()
-    handler_class = _make_handler(approved_path, rejected_path, output_path, done, review_approved_path)
+    handler_class = _make_handler(
+        approved_path, rejected_path, output_path, done,
+        review_approved_path,
+        ws_dir=approved_path.parent,
+    )
 
     class _ReuseServer(socketserver.TCPServer):
         allow_reuse_address = True
@@ -1317,21 +1558,4 @@ def run_preview(
             httpd.shutdown()
 
     print(f"[preview] ✅ {output_path}")
-    return output_path
-
-
-# ── Alias estático (geração de HTML sem servidor) ─────────────────────────────
-
-def generate_preview(approved_path: Path, output_path: Path | None = None) -> Path:
-    """Gera um HTML estático (sem servidor) para visualização offline."""
-    approved_path = approved_path.resolve()
-    rejected_path = approved_path.parent / "questoes_com_erro.json"
-    if not rejected_path.exists():
-        rejected_path = None
-
-    if output_path is None:
-        output_path = approved_path.parent / "prova_preview.html"
-
-    content = _build_html(approved_path, rejected_path)
-    output_path.write_text(content, encoding="utf-8")
     return output_path

@@ -1,11 +1,13 @@
-"""MCP Server — Exames Nacionais Pipeline (P3: superfície reduzida a 5 tools).
+"""MCP Server — Exames Nacionais Pipeline (P3: superfície reduzida a 7 tools).
 
 Ferramentas expostas:
   list_workspaces()           — lista workspaces e estado resumido de cada um
   workspace_status(workspace) — estado detalhado + próxima acção sugerida
   run_stage(workspace, stage) — executa um estágio do pipeline
   run_review(workspace)       — abre preview interactivo para revisão humana
-  run_fix_question(...)       — correcção pontual de um campo pós-revisão
+  run_fix_question(...)       — correcção de questão via overlay (não destrutivo)
+  run_fix_cc(...)             — correcção de critérios CC via overlay (não destrutivo)
+  get_cc_context(ws_cc, id)   — texto_original de um critério sem ler o JSON inteiro
 
 Stages de run_stage:
   extract   — OCR (MinerU) + cotações + estruturação
@@ -19,12 +21,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from . import overlay as overlay_mod
 from .module_categorize import check_all_categorized
 from .workspace_state import WorkspaceStage
 
@@ -38,22 +42,35 @@ _PKG = "exames_pipeline.cli"
 mcp = FastMCP(
     "Exames Nacionais Pipeline",
     instructions=(
-        "Pipeline: extrair → validar → CC-VD → merge → upload questões para Supabase.\n\n"
-        "Estados: fresh → extracted → validated → cc_merged → human_approved → uploaded\n"
-        "CC sub-pipeline (workspace separado): cc_fresh → cc_extracted → cc_validated\n\n"
-        "Tools: list_workspaces | workspace_status | run_stage | run_review | run_fix_question\n"
-        "Stages de run_stage: extract | validate | cc (×2) | merge | upload\n\n"
-        "⚠️ MinerU deve correr fora do sandbox (Terminal). Se extract falhar, correr MinerU\n"
-        "   manualmente, copiar prova.md + images/ para o workspace e chamar extract sem pdf_path.\n"
-        "⚠️ Nunca re-extrair/re-validar após edições. Correções pontuais: run_fix_question.\n"
-        "   Em dúvida, chamar workspace_status() primeiro."
+        "SEQUÊNCIA LINEAR OBRIGATÓRIA — nunca saltar nem paralelizar passos:\n"
+        "  FASE 1 (sessão principal):\n"
+        "    1. run_stage(extract, pdf_path='...') ← SEMPRE PRIMEIRO; pré-processa + tenta MinerU auto\n"
+        "       Se retornar '⚠️ MinerU falhou': pedir ao utilizador para correr o comando exacto impresso\n"
+        "       e depois chamar run_stage(extract) SEM pdf_path — normaliza output automaticamente.\n"
+        "    2. AGENTE revê prova.md (Read + Edit)\n"
+        "    3. AGENTE revê questoes_review.json (reviewed:true + categorização em cada item)\n"
+        "    4. run_stage(validate)  ← só avança quando TODOS os itens tiverem reviewed:true\n"
+        "    5. ⛔ SESSÃO TERMINA AQUI — após validate retornar ✅, NÃO chamar mais nenhuma tool.\n"
+        "       Mostrar a mensagem de handoff ao humano e aguardar o /clear.\n"
+        "       Se o humano pedir para continuar sem fazer /clear, RECUSAR e reenviar o bloco de handoff.\n"
+        "  FASE 2 (sessão nova, só após validate + /clear):\n"
+        "    6. run_stage(cc, pdf_cc_path='...') ← tenta MinerU CC-VD auto; mesmo fallback acima\n"
+        "    7. AGENTE revê criterios_review.json + criterios_ocr_flags.json\n"
+        "       (para OCR-SUSPECT: usar get_cc_context(); documentar em OCR-RESOLVED: ou OCR-FALSE-POSITIVE:)\n"
+        "    8. run_stage(cc)  ← 2ª chamada (cc_validate)\n"
+        "    9. run_stage(merge)\n"
+        "   10. run_review  ← humano aprova no browser\n"
+        "   11. run_stage(upload)\n"
+        "Em dúvida: workspace_status(). Correcções pós-merge: run_fix_question() / run_fix_cc() — não destrutivos.\n"
+        "NUNCA pedir ao utilizador para correr MinerU antes de tentar run_stage com pdf_path.\n"
+        "NUNCA pedir cp manual de prova.md ou images/ — run_stage normaliza o output automaticamente."
     ),
 )
 
 
 # ── Helpers internos ──────────────────────────────────────────────────────────
 
-def _run(args: list[str], cwd: Path | None = None) -> dict[str, Any]:
+def _run(args: list[str], cwd: Path | None = None, timeout: int = 300) -> dict[str, Any]:
     """Corre um subcomando do pipeline e devolve {ok, stdout, stderr, returncode}."""
     env = os.environ.copy()
     env["PYTHONPATH"] = str(_REPO_DIR / "src")
@@ -66,7 +83,7 @@ def _run(args: list[str], cwd: Path | None = None) -> dict[str, Any]:
             text=True,
             cwd=str(cwd or _REPO_DIR),
             env=env,
-            timeout=300,
+            timeout=timeout,
         )
         return {
             "ok":         result.returncode == 0,
@@ -75,7 +92,7 @@ def _run(args: list[str], cwd: Path | None = None) -> dict[str, Any]:
             "returncode": result.returncode,
         }
     except subprocess.TimeoutExpired:
-        return {"ok": False, "stdout": "", "stderr": "Timeout (300s)", "returncode": -1}
+        return {"ok": False, "stdout": "", "stderr": f"Timeout ({timeout}s)", "returncode": -1}
     except Exception as exc:
         return {"ok": False, "stdout": "", "stderr": str(exc), "returncode": -1}
 
@@ -100,19 +117,94 @@ def _count_json(workspace: str, filename: str) -> int | None:
 
 
 def _count_reviewed(workspace: str) -> tuple[int, int] | None:
-    """Devolve (reviewed, total) para questoes_raw.json, ou None se não existir."""
-    path = _workspace_path(workspace) / "questoes_raw.json"
-    if not path.exists():
-        return None
+    """Devolve (reviewed, total). Prefere questoes_review.json; cai em questoes_raw.json."""
+    ws_dir = _workspace_path(workspace)
+    for fname in ("questoes_review.json", "questoes_raw.json"):
+        path = ws_dir / fname
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, list):
+                continue
+            total = len(data)
+            reviewed = sum(1 for q in data if isinstance(q, dict) and q.get("reviewed"))
+            return reviewed, total
+        except Exception:
+            continue
+    return None
+
+
+def _merge_review_meta(workspace: str) -> str | None:
+    """Merge questoes_review.json + questoes_meta.json → questoes_raw.json antes do validate.
+
+    Devolve mensagem de erro ou None se bem-sucedido.
+    Se questoes_review.json não existir (workspace antigo), não faz nada (None).
+    """
+    ws_dir = _workspace_path(workspace)
+    review_path = ws_dir / "questoes_review.json"
+    meta_path   = ws_dir / "questoes_meta.json"
+
+    if not review_path.exists():
+        return None  # workspace antigo — questoes_raw.json já está completo
+
+    if not meta_path.exists():
+        return f"❌ questoes_meta.json não encontrado em '{workspace}' (ficheiro gerado pelo extract)."
+
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, list):
-            return None
-        total = len(data)
-        reviewed = sum(1 for q in data if isinstance(q, dict) and q.get("reviewed"))
-        return reviewed, total
-    except Exception:
-        return None
+        review_list: list[dict] = json.loads(review_path.read_text(encoding="utf-8"))
+        meta_list:   list[dict] = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return f"❌ Erro ao ler ficheiros de review/meta: {exc}"
+
+    meta_by_id = {m.get("id_item", ""): m for m in meta_list}
+    # Ordem máxima existente no meta, para atribuir valores sequenciais aos itens novos
+    _max_ordem = max((m.get("ordem_item") or 0 for m in meta_list), default=0)
+    _ITEM_ID_RE = re.compile(r"^(?:[IVX]+-)?(?P<main>\d{1,3})(?:\.(?P<sub>\d{1,2}))?$")
+
+    def _meta_fallback(id_: str, ordem: int) -> dict:
+        """Gera entrada de meta mínima para itens ausentes do questoes_meta.json."""
+        mat = _ITEM_ID_RE.match(id_)
+        main = int(mat.group("main")) if mat else 0
+        sub  = mat.group("sub") if mat else None
+        return {
+            "id_item": id_,
+            "numero_questao": main,
+            "ordem_item": ordem,
+            "numero_principal": main,
+            "subitem": sub,
+            "materia": "Matemática A",
+            "imagens_contexto": [],
+            "pagina_origem": None,
+            "fonte": "",
+            "status": "draft",
+            "texto_original": "",
+            "source_span": None,
+            "grupo_ids": [id_],
+            "descricoes_imagens": {},
+            "criterios_parciais": [],
+            "resolucoes_alternativas": [],
+        }
+
+    merged = []
+    for r in review_list:
+        id_ = r.get("id_item", "")
+        if id_ in meta_by_id:
+            m = meta_by_id[id_]
+        else:
+            _max_ordem += 1
+            m = _meta_fallback(id_, _max_ordem)
+        merged.append({**m, **r})
+
+    raw_path = ws_dir / "questoes_raw.json"
+    try:
+        raw_path.write_text(
+            json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception as exc:
+        return f"❌ Erro ao gravar questoes_raw.json: {exc}"
+
+    return None
 
 
 def _find_cc_workspace(workspace: str) -> str | None:
@@ -181,8 +273,8 @@ def _next_action(ws_dir: Path, workspace: str) -> str:
             cc_prova = cc_dir / "prova.md"
             if not cc_prova.exists():
                 return (
-                    f"Correr MinerU no PDF CC-VD → copiar prova.md para workspace/{cc_ws}/prova.md,\n"
-                    f"  depois run_stage(workspace='{workspace}', stage='cc', workspace_cc='{cc_ws}')"
+                    f"run_stage(workspace='{workspace}', stage='cc', workspace_cc='{cc_ws}', pdf_cc_path='<CAMINHO-CC-VD.pdf>')\n"
+                    f"  (MinerU corre automaticamente; ou omitir pdf_cc_path e correr MinerU manualmente)"
                 )
             return f"run_stage(workspace='{workspace}', stage='cc', workspace_cc='{cc_ws}')"
         # Sem CC-VD detectado → ir directamente para revisão + upload
@@ -194,11 +286,12 @@ def _next_action(ws_dir: Path, workspace: str) -> str:
 
     if stage == "extracted":
         rev = _count_reviewed(workspace)
+        review_file = "questoes_review.json" if (ws_dir / "questoes_review.json").exists() else "questoes_raw.json"
         if rev:
             reviewed, total = rev
             if reviewed < total:
                 return (
-                    f"Rever questoes_raw.json ({reviewed}/{total} revistos — "
+                    f"Rever {review_file} ({reviewed}/{total} revistos — "
                     f"{total - reviewed} pendentes: reviewed:true + categorização),\n"
                     f"  depois run_stage(workspace='{workspace}', stage='validate')"
                 )
@@ -245,6 +338,46 @@ def _start_preview_background(json_path: Path, cli_cmd: str, port: int) -> str:
         start_new_session=True,
     )
     return f"http://localhost:{port}"
+
+
+def _snapshot_before_stage(ws_dir: Path, stage: str) -> None:
+    """Cria backup dos ficheiros antes de um stage destrutivo (máx 5 por stage)."""
+    import shutil
+    from datetime import datetime as _dt
+    ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+    backup_dir = ws_dir / ".backups" / f"{stage}-{ts}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    for fname in (
+        "questoes_final.json",
+        "questoes_aprovadas.json",
+        "criterios_aprovados.json",
+        "correcoes_humanas.json",
+        "questoes_final.approved_snapshot.json",
+    ):
+        src = ws_dir / fname
+        if src.exists():
+            shutil.copy2(src, backup_dir / fname)
+    # Rotação: manter últimos 5 por stage
+    backups_dir = ws_dir / ".backups"
+    all_stage = sorted(backups_dir.glob(f"{stage}-*"))
+    for old in all_stage[:-5]:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def _overlay_gate_msg(ws_dir: Path) -> str:
+    """Mensagem informativa se houver overlay activo. Não bloqueia."""
+    summary = overlay_mod.overlay_summary(ws_dir)
+    if not summary["has_overlay"]:
+        return ""
+    msg = (
+        f"\nℹ️  Overlay activo: {summary['items']} item(ns), {summary['fields']} campo(s) "
+        f"com correcções humanas/agente.\n"
+        f"   As correcções serão reaplicadas automaticamente sobre o novo output.\n"
+        f"   Para DESCARTAR o overlay: force=True (irreversível).\n"
+    )
+    if summary["orphans"]:
+        msg += f"   ⚠️  {summary['orphans']} item(ns) no overlay não existem na base (órfãos).\n"
+    return msg
 
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
@@ -302,11 +435,13 @@ def workspace_status(workspace: str) -> str:
     rev = _count_reviewed(workspace)
     reviewed_str = f"{rev[0]}/{rev[1]} revistos" if rev else "—"
 
+    ws_dir2 = _workspace_path(workspace)
+    review_label = "questoes_review.json" if (ws_dir2 / "questoes_review.json").exists() else "questoes_raw.json"
     lines = [
         f"Workspace: {s['nome']}",
         f"  estado pipeline:     {ws.stage}",
         f"  prova.md:            {'✅' if s['prova_md'] else '❌ (MinerU pendente)'}",
-        f"  questoes_raw.json:   {s['questoes_raw'] or '❌'} questões   [{reviewed_str}]",
+        f"  {review_label}:   {s['questoes_raw'] or '❌'} questões   [{reviewed_str}]",
         f"  questoes_aprovadas:  {s['questoes_aprovadas'] or '❌'} questões",
         f"  questoes_com_erro:   {s['questoes_com_erro'] or 0} erros",
         f"  questoes_final.json: {s['questoes_final'] or '❌'} questões",
@@ -325,6 +460,19 @@ def workspace_status(workspace: str) -> str:
         lines.append(f"  CC workspace:        não detectado")
 
     lines.append(f"  upload Supabase:     {'✅ feito' if s['upload_done'] else '❌ pendente'}")
+
+    # Overlay de correcções humanas/agente
+    ov_summary = overlay_mod.overlay_summary(ws_dir)
+    if ov_summary["has_overlay"]:
+        ov_line = (
+            f"  correcoes_humanas:   {ov_summary['items']} item(ns), "
+            f"{ov_summary['fields']} campo(s)"
+        )
+        if ov_summary["orphans"]:
+            ov_line += f" — ⚠️ {ov_summary['orphans']} órfão(s)"
+        lines.append(ov_line)
+    else:
+        lines.append("  correcoes_humanas:   (sem overlay)")
 
     # Ficheiros adicionais
     ws_files = sorted(ws_dir.iterdir())
@@ -347,24 +495,18 @@ def run_stage(
     stage: str,
     pdf_path: str | None = None,
     workspace_cc: str | None = None,
+    pdf_cc_path: str | None = None,
     force: bool = False,
 ) -> str:
-    """Executa um estágio do pipeline de exames.
-
-    Stages disponíveis:
-      extract  — OCR + cotações + estruturação; pdf_path obrigatório se prova.md não existir.
-                 Se prova.md já existir (MinerU manual), re-estrutura sem re-correr OCR.
-      validate — micro-lint interno + validação heurística. Requer todos os itens reviewed:true.
-      cc       — critérios CC-VD: 1ª chamada → cc_extract; 2ª chamada (pós-revisão) → cc_validate.
-      merge    — cc_merge + abre preview para revisão humana. Bloqueia se questões sem categorização.
-      upload   — upload Supabase + backup automático. Bloqueia sem .review_approved.
+    """Executa um estágio do pipeline: extract | validate | cc (×2) | merge | upload.
 
     Args:
-        workspace:    Nome do workspace da prova (ex: "EX-MatA635-F1-2024_net")
-        stage:        Um de: extract | validate | cc | merge | upload
-        pdf_path:     Caminho absoluto para o PDF (obrigatório em 'extract' se prova.md não existir)
-        workspace_cc: Nome do workspace CC-VD (obrigatório em 'cc' e 'merge'; auto-detectado se omitido)
-        force:        Ignora a protecção de estado (DESTRUTIVO — usar com cuidado)
+        workspace:    Nome do workspace (ex: "EX-MatA635-F1-2024_net")
+        stage:        extract | validate | cc | merge | upload
+        pdf_path:     PDF absoluto da prova (extract, se prova.md não existir)
+        workspace_cc: Workspace CC-VD (cc/merge; auto-detectado se omitido)
+        pdf_cc_path:  PDF absoluto do CC-VD (cc, 1ª chamada, se prova.md não existir)
+        force:        Ignora protecção de estado (DESTRUTIVO)
     """
     stage = stage.strip().lower()
     valid_stages = {"extract", "validate", "cc", "merge", "upload"}
@@ -385,27 +527,64 @@ def run_stage(
         prova_md = ws_dir / "prova.md"
 
         if pdf_path:
-            # Caminho normal: MinerU + cotações + estruturação
-            args = ["extract", pdf_path, "--workspace", workspace]
-            result = _run(args)
+            # Passo 1: pré-processar o PDF (pymupdf + Pillow — corre no sandbox)
+            from .module_preprocess import preprocess_pdf_for_ocr  # noqa: PLC0415
+            pdf_p = Path(pdf_path)
+            ws_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                preprocessed = preprocess_pdf_for_ocr(pdf_p, ws_dir)
+            except Exception as exc:
+                preprocessed = pdf_p
+                print(f"[preprocess] ❌ {exc} — usando PDF original.")
+
+            # Passo 2: MinerU + cotações + estruturação (timeout 900s para PDFs grandes)
+            args = ["extract", str(preprocessed), "--workspace", workspace, "--no-preprocess"]
+            result = _run(args, timeout=900)
+
+            if not result["ok"]:
+                # Fallback: instruir o utilizador a correr MinerU manualmente
+                mineru_cmd = (
+                    f".venv-mineru/bin/mineru -b pipeline"
+                    f" -p '{preprocessed}'"
+                    f" -o workspace/{workspace}"
+                )
+                return (
+                    f"✅ Pré-processamento concluído → {preprocessed}\n\n"
+                    f"⚠️ MinerU falhou automaticamente. Corre no Terminal:\n"
+                    f"  {mineru_cmd}\n\n"
+                    f"Depois: run_stage(workspace='{workspace}', stage='extract') sem pdf_path.\n\n"
+                    f"Erro: {result['stderr'][:500] if result['stderr'] else result['stdout'][:500]}"
+                )
         elif prova_md.exists():
-            # MinerU já foi corrido manualmente — só estruturar
+            # MinerU já foi corrido manualmente e prova.md já foi copiado — só estruturar
             args = ["structure", str(prova_md)]
             result = _run(args)
         else:
-            return (
-                f"❌ Nenhum PDF nem prova.md encontrado para '{workspace}'.\n\n"
-                f"Opção A: run_stage(workspace='{workspace}', stage='extract', pdf_path='<CAMINHO>')\n"
-                f"Opção B: correr MinerU no Terminal, copiar prova.md para workspace/{workspace}/, "
-                f"depois run_stage(workspace='{workspace}', stage='extract') sem pdf_path."
-            )
+            # Tentar normalizar output manual do MinerU (localiza .md via rglob)
+            from .pdf_parser import normalize_mineru_workspace  # noqa: PLC0415
+            ws_dir.mkdir(parents=True, exist_ok=True)
+            normalized = normalize_mineru_workspace(ws_dir)
+            if normalized:
+                args = ["structure", str(normalized)]
+                result = _run(args)
+            else:
+                return (
+                    f"❌ Nenhum PDF nem output do MinerU encontrado em '{workspace}'.\n\n"
+                    f"Opção A (recomendada): run_stage(workspace='{workspace}', stage='extract', pdf_path='<CAMINHO>')\n"
+                    f"  → pré-processa o PDF e tenta correr MinerU automaticamente.\n\n"
+                    f"Opção B (MinerU manual):\n"
+                    f"  .venv-mineru/bin/mineru -b pipeline -p '<PDF>' -o workspace/{workspace}\n"
+                    f"  Depois: run_stage(workspace='{workspace}', stage='extract') sem pdf_path\n"
+                    f"  → normaliza automaticamente o output, sem copiar ficheiros à mão."
+                )
 
         if result["ok"]:
             ws.transition("extracted")
             return _format_result("extract", result) + (
                 f"\n\n📋 Próximos passos:\n"
-                f"  1. Verificar cotacoes_estrutura.json (chaves devem usar prefixo: 'I-1', 'II-2.1')\n"
-                f"  2. Rever questoes_raw.json: reviewed:true + categorização em cada item\n"
+                f"  1. Verificar cotacoes_estrutura.json (chaves: 'I-1', 'II-2.1')\n"
+                f"  2. Rever questoes_review.json: reviewed:true + categorização em cada item\n"
+                f"     (para verificar OCR de um item: get_question_context(workspace, id_item))\n"
                 f"  3. run_stage(workspace='{workspace}', stage='validate')"
             )
         return _format_result("extract", result)
@@ -433,6 +612,13 @@ def run_stage(
                     f"Rever todos os itens em questoes_raw.json (Read + Edit) antes de validar."
                 )
 
+        # Aviso informativo sobre overlay (validate regenera questoes_raw, overlay sobrevive)
+        gate_msg = _overlay_gate_msg(ws_dir)
+
+        # Merge review+meta → questoes_raw.json (workspaces novos com ficheiros split)
+        if merge_err := _merge_review_meta(workspace):
+            return merge_err
+
         # Passo 1 (interno): micro-lint
         lint_result = _run(["micro-lint", str(raw)])
         lint_ok = "✅" if lint_result["ok"] else "❌"
@@ -449,14 +635,24 @@ def run_stage(
         if val_result["ok"]:
             ws.transition("validated")
 
+        _phase1_stop = (
+            f"\n\n{'═' * 55}\n"
+            f"⛔ PARE AQUI. Não chame mais nenhuma tool nesta sessão.\n"
+            f"{'═' * 55}\n\n"
+            f"FASE 1 concluída — workspace: {workspace}\n\n"
+            f"ACÇÃO DO HUMANO:\n"
+            f"  1. Digite:   /clear\n\n"
+            f"  2. Cole na sessão nova:\n\n"
+            f"  {'─' * 50}\n"
+            f"  Continuar FASE 2 do workspace \"{workspace}\".\n"
+            f"  Invocar /exames para retomar a partir do estado validated.\n"
+            f"  {'─' * 50}\n"
+        ) if val_result["ok"] else ""
         return (
-            f"{lint_ok} micro-lint\n{lint_summary}\n\n"
+            gate_msg
+            + f"{lint_ok} micro-lint\n{lint_summary}\n\n"
             + _format_result("validate", val_result)
-            + (
-                f"\n\n📋 Próximo passo: run_stage(workspace='{workspace}', stage='cc', "
-                f"workspace_cc='<NOME-CC-VD>') — ou run_review se sem CC-VD"
-                if val_result["ok"] else ""
-            )
+            + _phase1_stop
         )
 
     # ── cc ────────────────────────────────────────────────────────────────────
@@ -473,12 +669,54 @@ def run_stage(
         prova_cc_md = ws_cc_dir / "prova.md"
 
         if not prova_cc_md.exists():
+            if pdf_cc_path:
+                # MinerU CC-VD sem preprocess (PDFs de critérios são texto nítido)
+                # timeout 900s para PDFs grandes
+                cc_args = ["extract", pdf_cc_path, "--workspace", workspace_cc, "--no-preprocess"]
+                cc_extract_result = _run(cc_args, timeout=900)
+                if not cc_extract_result["ok"]:
+                    mineru_cmd = (
+                        f".venv-mineru/bin/mineru -b pipeline"
+                        f" -p '{pdf_cc_path}'"
+                        f" -o workspace/{workspace_cc}"
+                    )
+                    return (
+                        f"⚠️ MinerU CC-VD falhou automaticamente. Corre no Terminal:\n"
+                        f"  {mineru_cmd}\n\n"
+                        f"Depois: run_stage(workspace='{workspace}', stage='cc', workspace_cc='{workspace_cc}') sem pdf_cc_path.\n\n"
+                        f"Erro: {cc_extract_result['stderr'][:500] if cc_extract_result['stderr'] else cc_extract_result['stdout'][:500]}"
+                    )
+                # MinerU correu — normalizar output se prova.md ainda não existir
+                if not prova_cc_md.exists():
+                    from .pdf_parser import normalize_mineru_workspace  # noqa: PLC0415
+                    normalized_cc = normalize_mineru_workspace(ws_cc_dir)
+                    if not normalized_cc:
+                        return f"❌ MinerU terminou mas prova.md não foi gerado em '{workspace_cc}'."
+            else:
+                # Tentar normalizar output manual do MinerU CC-VD (localiza .md via rglob)
+                from .pdf_parser import normalize_mineru_workspace  # noqa: PLC0415
+                ws_cc_dir.mkdir(parents=True, exist_ok=True)
+                normalized_cc = normalize_mineru_workspace(ws_cc_dir)
+                if not normalized_cc:
+                    return (
+                        f"❌ prova.md não encontrado em '{workspace_cc}'.\n\n"
+                        f"Opção A (recomendada): run_stage(workspace='{workspace}', stage='cc', workspace_cc='{workspace_cc}', pdf_cc_path='<CAMINHO-CC-VD.pdf>')\n"
+                        f"  → tenta correr MinerU automaticamente.\n\n"
+                        f"Opção B (MinerU manual):\n"
+                        f"  .venv-mineru/bin/mineru -b pipeline -p '<CC-VD.pdf>' -o workspace/{workspace_cc}\n"
+                        f"  Depois: run_stage(workspace='{workspace}', stage='cc', workspace_cc='{workspace_cc}')\n"
+                        f"  → normaliza automaticamente o output, sem copiar ficheiros à mão."
+                    )
+
+        # Gate obrigatório: prova principal deve estar validated antes de processar CC-VD
+        if not force and (err := ws.require_at_least("validated")):
             return (
-                f"❌ prova.md não encontrado em '{workspace_cc}'.\n\n"
-                f"Correr MinerU no PDF CC-VD (fora do sandbox):\n"
-                f"  .venv-mineru/bin/mineru -b pipeline -p '<CC-VD.pdf>' -o workspace/{workspace_cc}\n"
-                f"  Copiar prova.md gerado para workspace/{workspace_cc}/prova.md\n"
-                f"Depois chamar run_stage(stage='cc', workspace_cc='{workspace_cc}') novamente."
+                f"❌ BLOQUEADO: prova principal não está validada.\n"
+                f"{err}\n\n"
+                f"Sequência obrigatória ANTES de processar CC-VD:\n"
+                f"  1. Rever questoes_review.json (reviewed:true + categorização em cada item)\n"
+                f"  2. run_stage(workspace='{workspace}', stage='validate')\n"
+                f"  Só depois: run_stage(workspace='{workspace}', stage='cc', workspace_cc='{workspace_cc}')"
             )
 
         ws_cc = WorkspaceStage(ws_cc_dir)
@@ -495,14 +733,29 @@ def run_stage(
             result = _run(["cc-extract", str(prova_cc_md)])
             if result["ok"]:
                 ws_cc.transition_cc("cc_extracted")
+                # Verificar se há items flaggeados pelo lint OCR
+                flags_path = ws_cc_dir / "criterios_ocr_flags.json"
+                n_flags = 0
+                if flags_path.exists():
+                    try:
+                        n_flags = len(json.loads(flags_path.read_text(encoding="utf-8")))
+                    except Exception:
+                        pass
+                ocr_note = (
+                    f"\n  ⚠️  {n_flags} item(ns) com suspeitas OCR em criterios_ocr_flags.json\n"
+                    f"     → Ler criterios_ocr_flags.json PRIMEIRO; para cada item flaggeado\n"
+                    f"       usar get_cc_context(workspace_cc='{workspace_cc}', id_item='...') para ver o OCR bruto\n"
+                    f"     → Adicionar 'OCR-RESOLVED: original→correcto' ou 'OCR-FALSE-POSITIVE: justificação'\n"
+                    f"       nas observacoes antes de setar reviewed:true"
+                ) if n_flags else ""
                 return _format_result("cc-extract", result) + (
                     f"\n\n📋 Próximos passos:\n"
-                    f"  1. Rever criterios_raw.json em '{workspace_cc}':\n"
-                    f"     • Setar reviewed:true em cada item\n"
+                    f"  1. Ler criterios_review.json em '{workspace_cc}' (compacto, sem texto_original){ocr_note}\n"
+                    f"  2. Para cada item: setar reviewed:true\n"
                     f"     • GRUPO I (MC): preencher resposta_correta (gabarito na imagem do PDF)\n"
-                    f"     • Itens abertos sem etapas: extrair do bloco_ocr ou PDF com Edit\n"
+                    f"     • Itens abertos sem etapas: extrair do bloco OCR via get_cc_context() ou PDF com Edit\n"
                     f"     • Duplicados 'II-*': apagar entradas prefixadas se existirem versões simples\n"
-                    f"  2. run_stage(workspace='{workspace}', stage='cc', workspace_cc='{workspace_cc}')"
+                    f"  3. run_stage(workspace='{workspace}', stage='cc', workspace_cc='{workspace_cc}')"
                 )
             return _format_result("cc-extract", result)
 
@@ -547,6 +800,16 @@ def run_stage(
             if err := ws.require_exactly("validated"):
                 return err
 
+        # Backup preventivo antes de sobrescrever questoes_final.json
+        _snapshot_before_stage(ws_dir, "merge")
+
+        # Overlay: aviso informativo (overlay sobrevive ao re-merge)
+        gate_msg = _overlay_gate_msg(ws_dir)
+        if force and overlay_mod.overlay_summary(ws_dir)["has_overlay"]:
+            # force=True descarta o overlay
+            (ws_dir / "correcoes_humanas.json").unlink(missing_ok=True)
+            gate_msg = "⚠️  Overlay descartado (force=True).\n"
+
         ws_cc = WorkspaceStage(ws_cc_dir)
         if err := ws_cc.require_cc_at_least("cc_validated"):
             return err
@@ -562,18 +825,81 @@ def run_stage(
                 f"Editar directamente em questoes_aprovadas.json com Read + Edit."
             )
 
-        result = _run(["cc-merge", str(criterios), str(approved)])
-        output = _format_result("cc-merge", result)
+        # ── Gate B: verificações pré-voo (ignoradas com force=True) ──────────
+        if not force:
+            try:
+                approved_data: list[dict] = json.loads(approved.read_text(encoding="utf-8"))
+                criterios_data: list[dict] = json.loads(criterios.read_text(encoding="utf-8"))
+                criterios_ids = {
+                    c.get("id_item", "").lower().strip()
+                    for c in criterios_data if isinstance(c, dict)
+                }
+
+                # B1: itens com status validation_error em questoes_aprovadas
+                val_error_ids = [
+                    q.get("id_item", "?")
+                    for q in approved_data
+                    if isinstance(q, dict) and q.get("status") == "validation_error"
+                ]
+
+                # B2: itens não-context_stem sem critério CC correspondente
+                missing_cc: list[str] = []
+                for q in approved_data:
+                    if not isinstance(q, dict):
+                        continue
+                    if q.get("tipo_item") == "context_stem":
+                        continue
+                    if q.get("status") == "validation_error":
+                        continue  # já capturado em B1
+                    id_lower = (q.get("id_item") or str(q.get("numero_questao", ""))).lower().strip()
+                    in_cc = id_lower in criterios_ids or (
+                        id_lower.startswith("ii-")
+                        and re.sub(r"^ii-", "", id_lower) in criterios_ids
+                    )
+                    if not in_cc:
+                        missing_cc.append(q.get("id_item") or id_lower)
+
+                gate_b_msgs: list[str] = []
+                if val_error_ids:
+                    items_fmt = "\n".join(f"  • {i}" for i in val_error_ids)
+                    gate_b_msgs.append(
+                        f"  {len(val_error_ids)} item(ns) com status validation_error:\n{items_fmt}\n"
+                        f"  → Corrigir e re-executar run_stage(validate) para estes itens."
+                    )
+                if missing_cc:
+                    items_fmt = "\n".join(f"  • {i}" for i in missing_cc)
+                    gate_b_msgs.append(
+                        f"  {len(missing_cc)} item(ns) sem critério CC correspondente:\n{items_fmt}\n"
+                        f"  → Completar criterios_aprovados.json ou corrigir id_item nos critérios."
+                    )
+                if gate_b_msgs:
+                    return (
+                        gate_msg
+                        + f"❌ BLOQUEADO: merge pré-voo falhou.\n\n"
+                        + "\n".join(gate_b_msgs)
+                        + f"\n\nPara forçar o merge excluindo os itens problemáticos: force=True\n"
+                        f"  (itens excluídos ficam em questoes_merge_pendente.json)"
+                    )
+            except Exception:
+                pass  # Se não conseguir ler, cc-merge trata internamente
+
+        cc_merge_args = ["cc-merge", str(criterios), str(approved)]
+        if force:
+            cc_merge_args.append("--force")
+        result = _run(cc_merge_args)
+        output = gate_msg + _format_result("cc-merge", result)
 
         if result["ok"]:
             ws.transition("cc_merged")
             final = ws_dir / "questoes_final.json"
             if final.exists():
-                # Apagar aprovação anterior — novo merge exige nova revisão humana
+                # Apagar aprovação anterior e snapshot — novo merge exige nova revisão humana
                 review_flag = ws_dir / ".review_approved"
+                snapshot    = ws_dir / "questoes_final.approved_snapshot.json"
                 if review_flag.exists():
                     review_flag.unlink()
                     ws.reset_to("cc_merged")
+                snapshot.unlink(missing_ok=True)
                 url = _start_preview_background(final, "preview", 8798)
                 output += (
                     f"\n\n⚠️  REVISÃO HUMANA OBRIGATÓRIA antes do upload!\n"
@@ -585,16 +911,14 @@ def run_stage(
 
     # ── upload ────────────────────────────────────────────────────────────────
     if stage == "upload":
-        final = ws_dir / "questoes_final.json"
-        if not final.exists():
-            approved = ws_dir / "questoes_aprovadas.json"
-            if approved.exists():
-                final = approved
-            else:
-                return (
-                    f"❌ questoes_final.json não encontrado em '{workspace}'.\n"
-                    f"Corre run_stage(stage='merge') primeiro."
-                )
+        base_final = ws_dir / "questoes_final.json"
+        if not base_final.exists():
+            base_final = ws_dir / "questoes_aprovadas.json"
+        if not base_final.exists():
+            return (
+                f"❌ questoes_final.json não encontrado em '{workspace}'.\n"
+                f"Corre run_stage(stage='merge') primeiro."
+            )
 
         if not force and (err := ws.require_exactly("human_approved")):
             return (
@@ -607,7 +931,35 @@ def run_stage(
                 f"  4. run_stage(workspace='{workspace}', stage='upload') novamente"
             )
 
-        result = _run(["upload", str(final)])
+        # Materializar overlay → ficheiro que será enviado
+        mat_path, orphans = overlay_mod.materialize(ws_dir, base_final)
+        if orphans:
+            orphan_list = ", ".join(orphans)
+            # Aviso mas não bloqueia
+            orphan_warn = f"\n⚠️  Overlay tem {len(orphans)} item(ns) órfão(s) (não existem na base): {orphan_list}\n"
+        else:
+            orphan_warn = ""
+
+        # Validar contra snapshot aprovado
+        snapshot_path = ws_dir / "questoes_final.approved_snapshot.json"
+        if not force and snapshot_path.exists():
+            try:
+                current_data  = json.loads(mat_path.read_text(encoding="utf-8"))
+                snapshot_data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                if overlay_mod.canonical_hash(current_data) != overlay_mod.canonical_hash(snapshot_data):
+                    return (
+                        f"❌ BLOQUEADO: o conteúdo mudou após a aprovação humana.\n"
+                        f"   O preview mostrou um estado que já não é o actual.\n\n"
+                        f"Passos:\n"
+                        f"  1. run_review(workspace='{workspace}') para ver o estado actual\n"
+                        f"  2. Revise e clique '✅ Aprovar para Upload' novamente\n"
+                        f"  3. run_stage(workspace='{workspace}', stage='upload')"
+                    )
+            except Exception:
+                pass  # Se não conseguir comparar, prossegue
+
+        final = mat_path  # Envia o ficheiro materializado (base + overlay)
+        result = _run(["upload", str(final)], timeout=1200)
 
         if result["ok"]:
             (ws_dir / ".upload_done").touch()
@@ -619,9 +971,9 @@ def run_stage(
                 if backup_result["ok"]
                 else f"\n⚠️  Backup automático falhou: {backup_result['stderr'][:200]}"
             )
-            return _format_result("upload", result) + backup_msg
+            return orphan_warn + _format_result("upload", result) + backup_msg
 
-        return _format_result("upload", result)
+        return orphan_warn + _format_result("upload", result)
 
 
 @mcp.tool()
@@ -664,23 +1016,31 @@ def run_review(workspace: str) -> str:
 @mcp.tool()
 def run_fix_question(
     workspace: str,
-    id_item: str,
-    field: str,
-    value: str,
+    id_item: str | None = None,
+    field: str | None = None,
+    value: str | None = None,
+    fixes_json: str | None = None,
 ) -> str:
-    """Corrige um campo específico de uma questão em questoes_final.json (não-destrutivo).
+    """Corrige campo(s) de uma questão via overlay — não destrutivo, não re-extrai.
 
-    NUNCA corre validate, extract ou outros módulos — edita apenas o campo indicado.
-    Apaga a aprovação humana (.review_approved) — nova revisão é necessária antes do upload.
+    Modo simples (um campo):
+        run_fix_question(workspace, id_item="II-3.2", field="enunciado", value="…")
 
-    Campos permitidos: enunciado, solucao, resposta_correta, descricao_breve,
-                       tema, subtema, tags (JSON array), observacoes (JSON array)
+    Modo lote (vários campos/itens):
+        run_fix_question(workspace, fixes_json='[{"id_item":"II-3.2","field":"enunciado","value":"…"},…]')
+
+    Campos editáveis: enunciado, solucao, resposta_correta, descricao_breve,
+                      tema, subtema, tags (JSON array), observacoes (JSON array)
+
+    O overlay (correcoes_humanas.json) é aplicado automaticamente no preview e no upload.
+    A aprovação anterior é resetada — o humano deve rever e aprovar novamente.
 
     Args:
-        workspace: Nome do workspace
-        id_item:   ID do item a corrigir (ex: "II-3.2", "I-5")
-        field:     Campo a alterar
-        value:     Novo valor (para 'tags'/'observacoes' passar JSON array como string)
+        workspace:  Nome do workspace
+        id_item:    ID do item (ex: "II-3.2") — modo simples
+        field:      Campo a alterar — modo simples
+        value:      Novo valor — modo simples
+        fixes_json: JSON array de {id_item, field, value} — modo lote
     """
     import json as _json
 
@@ -689,58 +1049,313 @@ def run_fix_question(
     if err := ws.require_at_least("validated"):
         return err
 
-    final = ws_dir / "questoes_final.json"
-    if not final.exists():
+    # Verificar que existe a base de dados das questões
+    base_path = ws_dir / "questoes_final.json"
+    if not base_path.exists():
+        base_path = ws_dir / "questoes_aprovadas.json"
+    if not base_path.exists():
         return f"❌ questoes_final.json não encontrado em '{workspace}'."
 
-    ALLOWED = {"enunciado", "solucao", "resposta_correta", "descricao_breve",
-               "tema", "subtema", "tags", "observacoes"}
-    if field not in ALLOWED:
+    ALLOWED = {
+        "enunciado", "solucao", "resposta_correta", "descricao_breve",
+        "tema", "subtema", "tags", "observacoes",
+    }
+
+    # Construir lista de correções
+    if fixes_json:
+        try:
+            fixes = _json.loads(fixes_json)
+            if not isinstance(fixes, list):
+                return "❌ fixes_json deve ser um JSON array."
+        except _json.JSONDecodeError as exc:
+            return f"❌ fixes_json inválido: {exc}"
+    elif id_item and field and value is not None:
+        fixes = [{"id_item": id_item, "field": field, "value": value}]
+    else:
+        return "❌ Forneça (id_item + field + value) ou fixes_json."
+
+    # Ler base para validar existência dos itens
+    try:
+        data = _json.loads(base_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return f"❌ Erro ao ler {base_path.name}: {exc}"
+
+    base_ids = {str(q.get("id_item", "")) for q in data}
+
+    results: list[str] = []
+    errors:  list[str] = []
+
+    for fix in fixes:
+        fid   = str(fix.get("id_item", ""))
+        fld   = str(fix.get("field", ""))
+        fval  = fix.get("value", "")
+
+        if fid not in base_ids:
+            errors.append(f"  • {fid}: item não encontrado")
+            continue
+        if fld not in ALLOWED:
+            errors.append(
+                f"  • {fid}.{fld}: campo não permitido "
+                f"(permitidos: {', '.join(sorted(ALLOWED))})"
+            )
+            continue
+
+        # Campos que esperam array (tags, observacoes): parsear se vier como string
+        if fld in ("tags", "observacoes") and isinstance(fval, str):
+            try:
+                fval = _json.loads(fval)
+            except _json.JSONDecodeError:
+                errors.append(
+                    f"  • {fid}.{fld}: valor inválido — deve ser JSON array"
+                    f' (ex: ["tag1","tag2"])'
+                )
+                continue
+
+        overlay_mod.set_override(ws_dir, fid, fld, fval, source="agent")
+        results.append(f"  • {fid}.{fld} ✅")
+
+    if not results:
+        return "❌ Nenhuma correcção aplicada.\n" + "\n".join(errors)
+
+    # Resetar aprovação — nova correcção exige nova revisão humana
+    review_flag   = ws_dir / ".review_approved"
+    snapshot_path = ws_dir / "questoes_final.approved_snapshot.json"
+    if review_flag.exists():
+        review_flag.unlink()
+        snapshot_path.unlink(missing_ok=True)
+        has_final = (ws_dir / "questoes_final.json").exists()
+        ws.reset_to("cc_merged" if has_final else "validated")
+        reapproval_msg = "\n⚠️  Aprovação resetada — o agente corrigiu após a aprovação."
+    else:
+        reapproval_msg = ""
+
+    error_section = ("\n\nErros:\n" + "\n".join(errors)) if errors else ""
+
+    return (
+        f"✅ {len(results)} correcção(ões) gravadas no overlay (correcoes_humanas.json):"
+        f"\n" + "\n".join(results)
+        + error_section
+        + reapproval_msg
+        + f"\n\nO preview e o upload aplicam o overlay automaticamente."
+        + f"\nUse run_review(workspace='{workspace}') para verificar o estado final e aprovar."
+    )
+
+
+@mcp.tool()
+def run_fix_cc(
+    workspace: str,
+    id_item: str | None = None,
+    field: str | None = None,
+    value: str | None = None,
+    fixes_json: str | None = None,
+) -> str:
+    """Corrige campo(s) de critérios de classificação via overlay — não destrutivo.
+
+    Modo simples:
+        run_fix_cc(workspace, id_item="II-3.2", field="solucao", value="…")
+
+    Modo lote:
+        run_fix_cc(workspace, fixes_json='[{"id_item":"II-3.2","field":"solucao","value":"…"},…]')
+
+    Campos editáveis: solucao, criterios_parciais (JSON array), resolucoes_alternativas (JSON array)
+
+    Args:
+        workspace:  Nome do workspace (principal, onde está questoes_final.json)
+        id_item:    ID do item — modo simples
+        field:      Campo a alterar — modo simples
+        value:      Novo valor — modo simples
+        fixes_json: JSON array de {id_item, field, value} — modo lote
+    """
+    import json as _json
+
+    ws_dir = _workspace_path(workspace)
+    ws = WorkspaceStage(ws_dir)
+    if err := ws.require_at_least("cc_merged"):
         return (
-            f"❌ Campo '{field}' não permitido.\n"
-            f"Campos editáveis: {', '.join(sorted(ALLOWED))}"
+            f"❌ run_fix_cc requer estado ≥ cc_merged (merge já concluído).\n"
+            f"{err}\n"
+            f"Para corrigir critérios antes do merge: edite criterios_aprovados.json directamente."
         )
 
+    base_path = ws_dir / "questoes_final.json"
+    if not base_path.exists():
+        return f"❌ questoes_final.json não encontrado em '{workspace}'."
+
+    ALLOWED_CC = {"solucao", "criterios_parciais", "resolucoes_alternativas"}
+
+    if fixes_json:
+        try:
+            fixes = _json.loads(fixes_json)
+            if not isinstance(fixes, list):
+                return "❌ fixes_json deve ser um JSON array."
+        except _json.JSONDecodeError as exc:
+            return f"❌ fixes_json inválido: {exc}"
+    elif id_item and field and value is not None:
+        fixes = [{"id_item": id_item, "field": field, "value": value}]
+    else:
+        return "❌ Forneça (id_item + field + value) ou fixes_json."
+
     try:
-        data = _json.loads(final.read_text(encoding="utf-8"))
+        data = _json.loads(base_path.read_text(encoding="utf-8"))
     except Exception as exc:
         return f"❌ Erro ao ler questoes_final.json: {exc}"
 
-    found = False
-    for q in data:
-        if str(q.get("id_item", "")) == id_item:
-            if field in ("tags", "observacoes"):
+    base_ids = {str(q.get("id_item", "")) for q in data}
+    results: list[str] = []
+    errors:  list[str] = []
+
+    for fix in fixes:
+        fid  = str(fix.get("id_item", ""))
+        fld  = str(fix.get("field", ""))
+        fval = fix.get("value", "")
+
+        if fid not in base_ids:
+            errors.append(f"  • {fid}: item não encontrado")
+            continue
+        if fld not in ALLOWED_CC:
+            errors.append(
+                f"  • {fid}.{fld}: campo não permitido "
+                f"(permitidos: {', '.join(sorted(ALLOWED_CC))})"
+            )
+            continue
+
+        # Campos array: parsear se vier como string (suporta 1 ou 2 níveis de encoding)
+        if fld in ("criterios_parciais", "resolucoes_alternativas"):
+            for _ in range(2):  # tolera double-encoding
+                if not isinstance(fval, str):
+                    break
                 try:
-                    q[field] = _json.loads(value)
+                    fval = _json.loads(fval)
                 except _json.JSONDecodeError:
-                    return f"❌ Valor inválido para '{field}': deve ser JSON array (ex: [\"tag1\",\"tag2\"])"
-            else:
-                q[field] = value
-            found = True
-            break
+                    break
+            if not isinstance(fval, list):
+                errors.append(
+                    f"  • {fid}.{fld}: valor deve ser um array JSON (lista de dicts),"
+                    f" recebido {type(fval).__name__!r}"
+                )
+                continue
 
-    if not found:
-        ids = [str(q.get("id_item", "")) for q in data]
-        return f"❌ Item '{id_item}' não encontrado. IDs disponíveis: {ids}"
+        overlay_mod.set_override(ws_dir, fid, fld, fval, source="agent")
+        results.append(f"  • {fid}.{fld} ✅")
 
-    try:
-        final.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    except Exception as exc:
-        return f"❌ Erro ao gravar: {exc}"
+    if not results:
+        return "❌ Nenhuma correcção aplicada.\n" + "\n".join(errors)
 
-    # Apagar aprovação — nova correcção requer nova revisão humana
-    review_flag = ws_dir / ".review_approved"
+    # Resetar aprovação
+    review_flag   = ws_dir / ".review_approved"
+    snapshot_path = ws_dir / "questoes_final.approved_snapshot.json"
     if review_flag.exists():
         review_flag.unlink()
-        has_final = (ws_dir / "questoes_final.json").exists()
-        ws.reset_to("cc_merged" if has_final else "validated")
-        needs_reapproval = "\n⚠️  Aprovação resetada — revise e aprove novamente antes do upload."
+        snapshot_path.unlink(missing_ok=True)
+        ws.reset_to("cc_merged")
+        reapproval_msg = "\n⚠️  Aprovação resetada — critérios corrigidos após aprovação."
     else:
-        needs_reapproval = ""
+        reapproval_msg = ""
+
+    error_section = ("\n\nErros:\n" + "\n".join(errors)) if errors else ""
 
     return (
-        f"✅ {id_item}.{field} actualizado em questoes_final.json.{needs_reapproval}\n"
-        f"Use run_review(workspace='{workspace}') para verificar e aprovar."
+        f"✅ {len(results)} correcção(ões) CC gravadas no overlay:"
+        f"\n" + "\n".join(results)
+        + error_section
+        + reapproval_msg
+        + f"\n\nUse run_review(workspace='{workspace}') para verificar e aprovar."
+    )
+
+
+@mcp.tool()
+def get_question_context(workspace: str, id_item: str, pad: int = 3) -> str:
+    """Devolve o bloco bruto de prova.md para um item sem ler o ficheiro inteiro.
+
+    Útil para verificar OCR ou texto truncado de um item específico.
+
+    Args:
+        workspace: Nome do workspace
+        id_item:   ID do item (ex: "II-3.2", "I-5")
+        pad:       Linhas extra antes/depois do bloco (default: 3)
+    """
+    ws_dir = _workspace_path(workspace)
+
+    # Procurar source_span: prefere questoes_meta.json, cai em questoes_raw.json
+    source_span: dict | None = None
+    for fname in ("questoes_meta.json", "questoes_raw.json"):
+        path = ws_dir / fname
+        if not path.exists():
+            continue
+        try:
+            items = json.loads(path.read_text(encoding="utf-8"))
+            for item in items:
+                if str(item.get("id_item", "")) == id_item:
+                    source_span = item.get("source_span")
+                    break
+            if source_span:
+                break
+        except Exception:
+            continue
+
+    if not source_span:
+        return (
+            f"❌ Item '{id_item}' não encontrado ou sem source_span em '{workspace}'.\n"
+            f"Verifique o id_item com workspace_status('{workspace}')."
+        )
+
+    prova_md = ws_dir / "prova.md"
+    if not prova_md.exists():
+        return f"❌ prova.md não encontrado em '{workspace}'."
+
+    lines = prova_md.read_text(encoding="utf-8").splitlines()
+    line_start = max(0, source_span.get("line_start", 1) - 1 - pad)
+    line_end   = min(len(lines), source_span.get("line_end", 1) + pad)
+
+    excerpt = lines[line_start:line_end]
+    numbered = [f"{line_start + i + 1:4d} | {ln}" for i, ln in enumerate(excerpt)]
+    return (
+        f"prova.md — linhas {line_start + 1}–{line_end} (item {id_item}):\n"
+        + "\n".join(numbered)
+    )
+
+
+@mcp.tool()
+def get_cc_context(workspace_cc: str, id_item: str) -> str:
+    """Devolve o texto_original de um critério CC sem ler criterios_raw.json inteiro.
+
+    Útil para verificar o OCR bruto de um item flaggeado (OCR-SUSPECT) sem carregar
+    o ficheiro completo. Análogo a get_question_context() mas para critérios CC-VD.
+
+    Args:
+        workspace_cc: Nome do workspace CC-VD (ex: "EX-MatA635-F1-2024-CC-VD")
+        id_item:      ID do critério (ex: "3.1", "5", "II-2")
+    """
+    ws_dir = _workspace_path(workspace_cc)
+    raw_path = ws_dir / "criterios_raw.json"
+
+    if not raw_path.exists():
+        return (
+            f"❌ criterios_raw.json não encontrado em '{workspace_cc}'.\n"
+            f"Corre run_stage(stage='cc') primeiro."
+        )
+
+    try:
+        criterios: list[dict] = json.loads(raw_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return f"❌ Erro ao ler criterios_raw.json: {exc}"
+
+    for c in criterios:
+        if str(c.get("id_item", "")) == id_item:
+            texto = c.get("texto_original", "")
+            obs_suspects = [o for o in c.get("observacoes", []) if o.startswith("OCR-SUSPECT:")]
+            header = f"criterios_raw.json — item {id_item} (texto_original):"
+            if obs_suspects:
+                header += f"\n⚠️  Suspeitas OCR: {len(obs_suspects)}"
+                for s in obs_suspects:
+                    header += f"\n   {s}"
+            if not texto:
+                return f"{header}\n\n(texto_original vazio — item ausente do markdown CC)"
+            return f"{header}\n\n{texto}"
+
+    return (
+        f"❌ Item '{id_item}' não encontrado em criterios_raw.json de '{workspace_cc}'.\n"
+        f"IDs disponíveis: {', '.join(str(c.get('id_item','?')) for c in criterios)}"
     )
 
 

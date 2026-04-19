@@ -1,7 +1,7 @@
 [project]
-name = "extrator-provas-portugues"
+name = "exames-nacionais-pipeline"
 version = "0.1.0"
-description = "Pipeline dedicada a extrair, categorizar e armazenar questões de provas de Português."
+description = "Pipeline para extrair, categorizar e armazenar questoes de exames nacionais de Portugal."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

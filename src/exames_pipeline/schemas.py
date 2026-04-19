@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,14 @@ class Question:
     resolucoes_alternativas: list[str] = field(default_factory=list)
     grupo: str = ""          # "I", "II", … — vazio quando a prova não tem grupos
     reviewed: bool = False   # True após o agente rever e aprovar o item
+    # ── Campos específicos de Português ──────────────────────────────────────
+    pool_opcional: str = ""              # "I-opt", "II-opt"; vazio = item obrigatório
+    palavras_min: int | None = None      # Grupo III: limite mínimo de palavras
+    palavras_max: int | None = None      # Grupo III: limite máximo de palavras
+    linhas_referenciadas: list[str] = field(default_factory=list)
+    # Parâmetros A/B/C da dissertação:
+    # [{"parametro":"A","nome":"Conteúdo","niveis":[{"nivel":"N5","pontos":12,"descritor":"..."}]}]
+    parametros_classificacao: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -60,8 +69,15 @@ class Question:
             reviewed = bool(data["reviewed"])
         else:
             reviewed = not any("review-pending" in obs for obs in data.get("observacoes", []))
+        # Inferir numero_questao do id_item quando o campo estiver ausente
+        # (itens adicionados manualmente ao questoes_review.json sem entrada correspondente no meta)
+        if "numero_questao" in data:
+            numero_questao = int(data["numero_questao"])
+        else:
+            _m = re.match(r"^(?:[IVX]+-)?(\d{1,3})", data.get("id_item", "0"))
+            numero_questao = int(_m.group(1)) if _m else 0
         return cls(
-            numero_questao=int(data["numero_questao"]),
+            numero_questao=numero_questao,
             enunciado=data.get("enunciado", ""),
             alternativas=alternativas,
             id_item=data.get("id_item", ""),
@@ -91,6 +107,11 @@ class Question:
             resolucoes_alternativas=list(data.get("resolucoes_alternativas", [])),
             grupo=data.get("grupo", ""),
             reviewed=reviewed,
+            pool_opcional=data.get("pool_opcional", ""),
+            palavras_min=data.get("palavras_min"),
+            palavras_max=data.get("palavras_max"),
+            linhas_referenciadas=list(data.get("linhas_referenciadas", [])),
+            parametros_classificacao=list(data.get("parametros_classificacao", [])),
         )
 
 
@@ -143,6 +164,52 @@ def load_questions(path: Path) -> list[Question]:
     return [Question.from_dict(item) for item in raw]
 
 
+# ── Campos expostos ao agente durante revisão ─────────────────────────────────
+# Tudo o que não está aqui vai para questoes_meta.json (uso interno do validador).
+REVIEW_FIELDS: frozenset[str] = frozenset({
+    "id_item",               # chave de lookup
+    "tipo_item",             # MC / open / essay / complete_table / multi_select
+    "enunciado",             # texto a rever/corrigir
+    "alternativas",          # opções MC
+    "resposta_correta",      # GRUPO I MC — agente preenche
+    "tema",                  # categorização
+    "subtema",               # categorização
+    "descricao_breve",       # categorização
+    "tags",                  # categorização
+    "observacoes",           # alertas da extração
+    "reviewed",              # gate do validate
+    "imagens",               # refs de imagens a verificar
+    "enunciado_contexto_pai",# contexto do group stem para subitens
+    "grupo",                 # "I", "II", "III"
+    "solucao",               # questões abertas / dissertação
+    # Campos Português
+    "pool_opcional",         # "I-opt", "II-opt" ou vazio
+    "palavras_min",          # Grupo III
+    "palavras_max",          # Grupo III
+    "linhas_referenciadas",  # ["16", "29-30"] — linhas citadas no enunciado
+    "parametros_classificacao",  # parâmetros A/B/C dissertação
+})
+
+
+def split_question_for_review(q_dict: dict) -> tuple[dict, dict]:
+    """Divide um item em (review_dict, meta_dict).
+
+    review_dict — apenas REVIEW_FIELDS: o agente lê e edita este ficheiro.
+    meta_dict   — tudo o resto + id_item: usado internamente pelo validador.
+    O merge de ambos reconstrói o item completo em questoes_raw.json.
+    """
+    review = {k: v for k, v in q_dict.items() if k in REVIEW_FIELDS}
+    # id_item sempre presente no meta para servir de chave de merge
+    meta = {"id_item": q_dict.get("id_item", "")}
+    meta.update({k: v for k, v in q_dict.items() if k not in REVIEW_FIELDS})
+    return review, meta
+
+
+def merge_review_into_full(review: dict, meta: dict) -> dict:
+    """Reconstrói um item completo a partir de review + meta."""
+    return {**meta, **review}
+
+
 def dump_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -153,6 +220,21 @@ def dump_json(path: Path, payload: Any) -> None:
 
 def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+# ── Notas de rodapé de textos-âncora (Português) ─────────────────────────────
+
+@dataclass(slots=True)
+class NotaRodape:
+    numero: str   # "1", "2", …
+    texto: str    # "calamistrar – tornar crespo ou frisado"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "NotaRodape":
+        return cls(numero=str(data.get("numero", "")), texto=data.get("texto", ""))
 
 
 # ── Critérios de Classificação (CC-VD) ────────────────────────────────────────

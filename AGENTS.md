@@ -1,3 +1,65 @@
+Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
+
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+
+## 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+
+
 ## Contexto do projeto
 
 Pipeline Python para extrair, validar, categorizar e publicar questões de provas de exames nacionais de Matemática A (Portugal) → Supabase/PostgreSQL.
@@ -32,9 +94,9 @@ Pipeline Python para extrair, validar, categorizar e publicar questões de prova
 
 ---
 
-## Superfície MCP — 5 tools
+## Superfície MCP — 6 tools
 
-O agente usa apenas estes 5 comandos. Tudo o resto (micro-lint, cotações, cc_extract, cc_validate, cc_merge, backup) corre internamente.
+O agente usa apenas estes 6 comandos. Tudo o resto (micro-lint, cotações, cc_extract, cc_validate, cc_merge, backup) corre internamente.
 
 | Tool | Descrição |
 |------|-----------|
@@ -43,6 +105,7 @@ O agente usa apenas estes 5 comandos. Tudo o resto (micro-lint, cotações, cc_e
 | `run_stage(workspace, stage, ...)` | Executa um estágio do pipeline |
 | `run_review(workspace)` | Abre preview para revisão humana |
 | `run_fix_question(workspace, id_item, field, value)` | Correção pontual pós-revisão |
+| `get_question_context(workspace, id_item, pad=3)` | Extrato do prova.md para um item (verificar OCR sem ler o ficheiro inteiro) |
 
 ### Stages de `run_stage`
 
@@ -61,8 +124,8 @@ O agente usa apenas estes 5 comandos. Tudo o resto (micro-lint, cotações, cc_e
 ```
 MinerU (Terminal, fora do sandbox)
   → run_stage(stage='extract')
-  → revisão prova.md                [agente: Read + Edit]
-  → revisão questoes_raw.json       [agente: Read + Edit — reviewed:true + categorização inline]
+  → revisão prova.md                [agente: Read + Edit — ou get_question_context() para itens pontuais]
+  → revisão questoes_review.json    [agente: Read + Edit — reviewed:true + categorização inline]
   → run_stage(stage='validate')     [micro-lint + validação — internos]
   → MinerU CC-VD (Terminal)
   → run_stage(stage='cc')           [1ª chamada: cc_extract]
@@ -77,7 +140,7 @@ MinerU (Terminal, fora do sandbox)
 |------|-------------|------------|
 | OCR | CLI manual | — |
 | Revisão `prova.md` | **Agente** | Read + Edit |
-| Revisão questões + categorização | **Agente** | Read + Edit em `questoes_raw.json` |
+| Revisão questões + categorização | **Agente** | Read + Edit em `questoes_review.json` |
 | Lint + validação | MCP (interno) | `run_stage(stage='validate')` |
 | Critérios CC-VD | MCP + **Agente** | `run_stage(stage='cc')` × 2 → revisão → `run_stage(stage='merge')` |
 | Aprovação final | **Humano** | `run_review` |
@@ -105,14 +168,16 @@ Workspaces antigos (sem `state.json`) têm o estado inferido a partir dos fichei
 
 ---
 
-## Contrato de revisão em `questoes_raw.json`
+## Contrato de revisão em `questoes_review.json`
 
 Cada item gerado pelo `run_stage(stage='extract')` tem `"reviewed": false`. O agente deve:
-1. Ler `questoes_raw.json` com `Read`
+1. Ler `questoes_review.json` com `Read` (ficheiro compacto — sem `texto_original`, `source_span` e campos estruturais)
 2. Para cada item: verificar enunciado, alternativas, LaTeX, imagens; corrigir com `Edit`
 3. Preencher `tema`, `subtema`, `descricao_breve`, `tags` inline (exceto `context_stem`)
 4. Setar `"reviewed": true` no item após revisar
+5. Para verificar o OCR bruto de um item: `get_question_context(workspace, id_item)` — devolve o extrato do `prova.md` sem ler o ficheiro inteiro
 
+`run_stage(stage='validate')` faz o merge de `questoes_review.json` + `questoes_meta.json` antes do lint.  
 `run_stage(stage='validate')` bloqueia se existirem itens com `"reviewed": false`.  
 O mesmo contrato aplica-se a `criterios_raw.json` no fluxo CC-VD (sem categorização).
 
@@ -133,6 +198,7 @@ Se errado, corrigir com `Edit` antes de continuar.
 1. **GRUPO I (MC):** gabarito está numa imagem → ler com `Read` o PDF e preencher `resposta_correta` manualmente.
 2. **Itens com 0 etapas:** extrair manualmente do `bloco_ocr` ou do PDF com `Edit`.
 3. **Duplicados `II-*`:** se existirem entradas `II-1` (pending) e `1` (parsed), apagar as prefixadas.
+4. **Cobertura integral dos `criterios_parciais`:** O extractor agrega automaticamente o texto do 1.º Processo à `descricao` do último step top-level. Verificar que a `descricao` desse step contém: (a) descrição curta, (b) texto de transição se presente, (c) texto integral do 1.º Processo com todos os sub-passos. **Nunca encurtar nem parafrasear** — se truncado, restaurar do `texto_original`.
 
 ---
 

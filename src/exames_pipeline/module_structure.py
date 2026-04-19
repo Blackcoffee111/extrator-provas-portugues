@@ -6,12 +6,42 @@ import shutil
 from pathlib import Path
 
 from .config import Settings
-from .schemas import Question, dump_json, dump_questions
-from .utils import extract_inferred_alternatives, infer_fonte_from_path, split_markdown_question_blocks
+from .schemas import Question, dump_json, dump_questions, split_question_for_review
+from .utils import (
+    extract_inferred_alternatives,
+    extract_notas_rodape,
+    infer_fonte_from_path,
+    is_optional_marker,
+    split_markdown_question_blocks,
+)
 
 _HEADING_PREFIX_RE = _re.compile(r"^\s*\d+(?:\.\d+)*\.?\s*")
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+# Auto-correcções tipográficas PT (sem LaTeX)
+_PT_AUTO_CORRECTIONS: list[tuple[re.Pattern[str], str]] = [
+    # Aspas retas → aspas portuguesas (só fora de blocos de código/LaTeX)
+    (re.compile(r'(?<![`$\\])"([^"]+)"'), r'«\1»'),
+    # Reticências de três pontos → caractere único
+    (re.compile(r'\.\.\.'), '…'),
+]
+
+
+def _pt_auto_correct(text: str) -> str:
+    for pattern, replacement in _PT_AUTO_CORRECTIONS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _infer_materia_from_settings(settings: Settings) -> str:
+    root_name = settings.project_root.name.lower()
+    if "portugu" in root_name:
+        return "Português"
+    return "Matemática A"
+
+
 _COTACOES_TRUNCATE_PATTERN = re.compile(
-    r"(?m)^#{0,3}\s*COTA[ÇC][ÕO]ES\b",
+    r"(?m)^#{0,3}\s*(?:COTA[ÇC][ÕO]ES|FIM)\b",
     re.IGNORECASE,
 )
 _ALTERNATIVES_IN_ENUNCIADO_PATTERN = re.compile(r"\s*\(A\)[\s\S]*$")
@@ -59,6 +89,13 @@ def _build_draft_question(block, resolved_fonte: str, ctx: str) -> Question:
         enunciado = _ALTERNATIVES_IN_ENUNCIADO_PATTERN.sub("", enunciado).strip()
 
     observacoes: list[str] = []
+    for m in _CONTROL_CHAR_RE.finditer(block.raw_markdown):
+        start = max(0, m.start() - 20)
+        end = min(len(block.raw_markdown), m.end() + 20)
+        snippet = block.raw_markdown[start:end].replace("\n", " ").strip()
+        observacoes.append(
+            f"OCR-SUSPECT: control_char U+{ord(m.group()):04X} '{snippet}'"
+        )
     if block.suspected_numbering_reset:
         observacoes.append(
             f"Numeracao OCR suspeita: cabecalho original '{block.heading_label_raw}' normalizado para '{block.item_id}'."
@@ -79,7 +116,7 @@ def _build_draft_question(block, resolved_fonte: str, ctx: str) -> Question:
         numero_principal=block.numero_principal,
         subitem=block.subitem,
         tipo_item=block.inferred_type,
-        materia="Matemática A",
+        materia=resolved_materia,
         tema="Por categorizar",
         subtema="Por categorizar",
         tags=[],
@@ -94,6 +131,7 @@ def _build_draft_question(block, resolved_fonte: str, ctx: str) -> Question:
         source_span=block.source_span,
         enunciado_contexto_pai=ctx,
         grupo=block.grupo,
+        pool_opcional=block.pool_opcional,
     )
 
 
@@ -120,11 +158,17 @@ def structure_markdown(settings: Settings, markdown_path: Path, fonte: str = "")
     output_dir = markdown_path.parent
     _ensure_mineru_images_at_workspace_root(output_dir)
     resolved_fonte = fonte or infer_fonte_from_path(markdown_path)
+    resolved_materia = _infer_materia_from_settings(settings)
     markdown_text = markdown_path.read_text(encoding="utf-8")
 
     cotacoes_match = _COTACOES_TRUNCATE_PATTERN.search(markdown_text)
     if cotacoes_match:
         markdown_text = markdown_text[: cotacoes_match.start()]
+
+    if resolved_materia == "Português":
+        markdown_text = _pt_auto_correct(markdown_text)
+    else:
+        markdown_text = _latex_auto_correct(markdown_text)
 
     blocks = split_markdown_question_blocks(markdown_text)
     parent_context: dict[int, str] = {
@@ -138,21 +182,30 @@ def structure_markdown(settings: Settings, markdown_path: Path, fonte: str = "")
 
     for block in blocks:
         if block.is_context_stem:
+            enunciado_ctx = _HEADING_PREFIX_RE.sub("", block.raw_markdown, count=1).strip()
+            # Extrair notas de rodapé do excerto (Português) — ficam no campo observacoes
+            # como JSON para serialização em contextos.notas_rodape no Supabase.
+            notas = extract_notas_rodape(enunciado_ctx) if resolved_materia == "Português" else []
             q = Question(
                 numero_questao=block.numero_principal,
                 id_item=block.item_id,
                 numero_principal=block.numero_principal,
                 subitem=None,
                 ordem_item=block.ordem_item,
-                enunciado=_HEADING_PREFIX_RE.sub("", block.raw_markdown, count=1).strip(),
+                enunciado=enunciado_ctx,
                 tipo_item="context_stem",
                 status="approved",
                 fonte=resolved_fonte,
+                materia=resolved_materia,
                 imagens=block.imagens,
                 imagens_contexto=block.imagens_contexto,
                 source_span=block.source_span,
                 texto_original=block.raw_markdown,
                 grupo=block.grupo,
+                observacoes=(
+                    [f"[notas_rodape] {__import__('json').dumps(notas, ensure_ascii=False)}"]
+                    if notas else []
+                ),
             )
             questions.append(q)
             traces.append(
@@ -173,7 +226,7 @@ def structure_markdown(settings: Settings, markdown_path: Path, fonte: str = "")
             )
             continue
 
-        ctx = parent_context.get(block.numero_principal, "") or block.section_context
+        ctx = parent_context.get(block.numero_principal, "")
         draft = _build_draft_question(block, resolved_fonte, ctx)
         questions.append(draft)
         traces.append(
@@ -207,4 +260,17 @@ def structure_markdown(settings: Settings, markdown_path: Path, fonte: str = "")
     traces_path = output_dir / "questoes_raw.traces.json"
     dump_questions(raw_json_path, questions)
     dump_json(traces_path, traces)
+
+    # Gerar ficheiros de review compactos para o agente:
+    # questoes_review.json — apenas campos que o agente lê/edita
+    # questoes_meta.json   — campos estruturais usados pelo validador internamente
+    review_items: list[dict] = []
+    meta_items: list[dict] = []
+    for q in questions:
+        review, meta = split_question_for_review(q.to_dict())
+        review_items.append(review)
+        meta_items.append(meta)
+    dump_json(output_dir / "questoes_review.json", review_items)
+    dump_json(output_dir / "questoes_meta.json", meta_items)
+
     return raw_json_path
