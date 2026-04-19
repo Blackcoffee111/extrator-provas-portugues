@@ -8,6 +8,8 @@ from pathlib import Path
 from .config import Settings
 from .schemas import Question, dump_json, dump_questions, split_question_for_review
 from .utils import (
+    _FONTE_PATTERN,
+    _MATERIA_CODES,
     extract_inferred_alternatives,
     extract_notas_rodape,
     infer_fonte_from_path,
@@ -33,10 +35,13 @@ def _pt_auto_correct(text: str) -> str:
     return text
 
 
-def _infer_materia_from_settings(settings: Settings) -> str:
-    root_name = settings.project_root.name.lower()
-    if "portugu" in root_name:
-        return "Português"
+def _infer_materia_from_path(path: Path) -> str:
+    """Infere a matéria a partir do padrão EX-<código> no caminho do ficheiro."""
+    candidates = [path.stem] + [p.name for p in path.parents]
+    for candidate in candidates:
+        match = _FONTE_PATTERN.search(candidate)
+        if match:
+            return _MATERIA_CODES.get(match.group("materia"), match.group("materia"))
     return "Matemática A"
 
 
@@ -158,7 +163,7 @@ def structure_markdown(settings: Settings, markdown_path: Path, fonte: str = "")
     output_dir = markdown_path.parent
     _ensure_mineru_images_at_workspace_root(output_dir)
     resolved_fonte = fonte or infer_fonte_from_path(markdown_path)
-    resolved_materia = _infer_materia_from_settings(settings)
+    resolved_materia = _infer_materia_from_path(markdown_path)
     markdown_text = markdown_path.read_text(encoding="utf-8")
 
     cotacoes_match = _COTACOES_TRUNCATE_PATTERN.search(markdown_text)
