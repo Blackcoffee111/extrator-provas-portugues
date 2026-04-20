@@ -456,6 +456,14 @@ def upload_to_supabase(
         summary.errors.append("Nenhuma questão encontrada.")
         return summary
 
+    # Checagem de fonte — bloqueia upload se algum item não tiver fonte preenchida
+    sem_fonte = [q.id_item for q in questions if not (q.fonte or "").strip()]
+    if sem_fonte:
+        msg = f"Upload bloqueado: {len(sem_fonte)} item(ns) sem campo 'fonte': {sem_fonte}. Preencha 'fonte' em questoes_final.json antes de fazer upload."
+        print(f"[upload] ❌ {msg}")
+        summary.errors.append(msg)
+        return summary
+
     # Checagem de categorização — bloqueia upload se houver questões sem tema
     sem_cat = [
         q.id_item for q in questions
