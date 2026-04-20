@@ -70,11 +70,75 @@ cp "workspace/NOME/prova.md" "workspace/NOME/prova_original.md"
 
 Usar `Read` para ler o `prova.md`. **Ignorar capa, instruções ao aluno e formulário matemático** (não são extraídos para JSON). Começar a leitura ativa a partir do primeiro `# GRUPO` ou do primeiro item numerado `1.`.
 
-### 3.3 Verificar separação de itens e subitens
+### 3.3 Estrutura primeiro — separar GRUPOS, PARTES e questões comparando com cotações
 
-- Cada item numerado (`1.`, `2.`, ...) deve estar na sua própria linha
-- Subitens (`1.1.`, `1.2.`, ...) separados do item pai
-- Verificar contra a tabela de cotações no fim do documento
+**Antes de qualquer correção de texto**, reconstruir mentalmente a árvore da prova e confrontá-la com `cotacoes_estrutura.json`. É a única forma de garantir que nenhum item se perdeu, se fundiu ou migrou de grupo.
+
+**Passos obrigatórios:**
+
+1. Ler `cotacoes_estrutura.json` — é a "tabela de verdade": lista todos os itens que **têm** de existir, com as chaves no formato `"I-A-1"`, `"I-B-4"`, `"II-2"`, `"III-1"`.
+2. Percorrer o `prova.md` e montar a lista de todos os cabeçalhos encontrados:
+   - `# GRUPO I` / `# GRUPO II` / `# GRUPO III`
+   - `## PARTE A` / `## PARTE B` / `## PARTE C` (só no GRUPO I das provas 639)
+   - Itens numerados (`1.`, `2.`, …) e subitens (`1.1.`, `1.2.`, …)
+3. Confrontar as duas listas:
+   - **Falta um item no `prova.md`?** → item fundido com o anterior ou com prefixo perdido pelo OCR. Localizar no PDF e restaurar o prefixo, mas **sem inventar texto**.
+   - **Item a mais no `prova.md`?** → linha solta que o OCR numerou por engano, ou um exemplo/citação que ficou confundido com item. Rebaixar.
+   - **Item no grupo errado?** → mover para debaixo do cabeçalho correto.
+4. Confirmar que cada item está na sua própria linha e que subitens (`1.1.`) estão separados do item pai.
+
+**Padrões de fusão/perda frequentes em Português 639:**
+- Cabeçalho `## PARTE B` comido pelo parágrafo anterior → reinserir.
+- Item `4.` colado ao final do texto do item `3.` (ex: `"…conclui-se a análise. 4. Explique…"`) → quebrar em duas linhas.
+- Enunciado do GRUPO III interpretado como item do GRUPO II → verificar o cabeçalho de grupo.
+
+⚠️ **Regra absoluta:** não criar, renumerar ou fundir itens por iniciativa própria. Cada alteração à árvore deve ter evidência direta no PDF ou nas cotações. Em caso de ambiguidade, reportar e parar (ver AGENTS.md §5).
+
+### 3.3.1 Formatação de texto — quebras de linha, sobrescritos, notas de rodapé
+
+Aplicar apenas quando o erro for **inequívoco** e a forma correta for **observável** no PDF ou noutra parte do próprio documento. Se tiveres de "deduzir" qual devia ser o número da nota ou qual palavra foi perdida, **parar e reportar** (AGENTS.md §5).
+
+**Quebras de linha e marcadores de numeração — VERIFICAÇÃO OBRIGATÓRIA em cada `context_stem`:**
+
+Regex não é fiável para isto; o agente é responsável por conferir cada `context_stem` visualmente no PDF e aplicar o formato canónico. O `validate` bloqueia se o gate não for cumprido.
+
+Fluxo obrigatório, para cada `context_stem` (`I-ctx1`, `I-ctx2`, `II-ctx1`, `III-ctx1`, …):
+
+1. Chamar `get_context_stem_pdf_pages(workspace, id_item)` — devolve o PDF, páginas prováveis e o excerto actual de `prova.md`.
+2. Abrir o PDF com `Read(file_path=<pdf>, pages="<N>-<M>")` nas páginas indicadas.
+3. Contar visualmente os marcadores de linha na margem do excerto (típico: `5`, `10`, `15`…).
+4. No `enunciado` em `questoes_review.json`, aplicar o **formato canónico** para cada marcador presente:
+   ```
+   …texto anterior termina aqui.
+   5 texto que começa na linha 5 do excerto…
+   10 texto que começa na linha 10…
+   ```
+   - Cada marcador sozinho em início de linha, seguido de **um espaço** e do conteúdo daquela linha.
+   - Nunca deixar o número fundido à palavra seguinte (`5calamistrar`), inline no meio de uma frase (`… espetáculo. 15 A cara…` em linha única), nem com OCR corrompido (`|0`, `I0`, `l0`, `IO` → `10`).
+   - Não juntar linhas por "fluir melhor", não quebrar linhas para "alinhar" com a numeração.
+5. Decidir `tem_numeracao_linhas`:
+   - `true` — o excerto original no PDF tem marcadores de linha (típico de excertos literários e textos expositivos).
+   - `false` — não tem (típico do tema de dissertação em `III-ctx1` e de alguns poemas curtos).
+6. Se `tem_numeracao_linhas: false`, garantir que nenhum dígito do OCR ficou colado a palavras nem solto no meio do parágrafo.
+7. Marcar `linhas_verificadas: true` como último passo.
+
+O `validate` falha alto se: `tem_numeracao_linhas` for `null`, `linhas_verificadas` for `false`, o enunciado declarar `true` mas não tiver marcadores canónicos, ou declarar `false` mas ter resíduos numéricos suspeitos.
+
+**Sobrescritos de notas (¹ ² ³ ⁴ ⁵ ⁶ ⁷ ⁸ ⁹):**
+- Números fundidos a palavras (`cútis8`, `palavra2`) devem virar sobrescritos (`cútis⁸`, `palavra²`), **mas só quando o número aparece explicitamente na secção NOTAS do próprio documento**.
+- Se a nota está listada como `⁸ cútis: …` no bloco NOTAS, então `cútis8` → `cútis⁸` é inequívoco.
+- Se o número não está listado nas NOTAS, **não transformar** — pode ser um ano, página, ou dígito do corpo do texto.
+- Nunca inventar uma nota que não exista. Nunca renumerar notas.
+
+**Bloco NOTAS:**
+- Transcrever exatamente como está no PDF, incluindo abreviações e formulações estranhas.
+- **Nunca** reescrever, clarificar ou expandir uma definição — mesmo que pareça incompleta ou errada (ver AGENTS.md §5, hard stops).
+- Se o OCR perdeu parte de uma definição, marcar `[ILEGÍVEL]` e reportar.
+
+**Itálicos, aspas, citações:**
+- Aspas tipográficas PT: `"..."` → `«...»` quando claramente citação/fala.
+- Reticências: `...` → `…` (um único caractere).
+- Itálicos aparecem em títulos de obras e estrangeirismos — preservar `*palavra*` ou `_palavra_` conforme o OCR os produziu.
 
 ### 3.4 Padrões recorrentes de OCR — GRUPO I / GRUPO II
 
@@ -149,27 +213,125 @@ No final da revisão, listar: correções aplicadas por tipo · itens/subitens e
 
 ---
 
-## 4. Revisão em lote de questoes_raw.json (com categorização inline)
+## 4. Revisão em lote de questoes_review.json (com categorização inline)
 
 Após a revisão do `prova.md`, continuar automaticamente.
 
-O `run_stage(stage='extract')` gerou `questoes_raw.json` com todos os itens marcados `"reviewed": false`.
+O `run_stage(stage='extract')` gerou `questoes_review.json` com todos os itens marcados `"reviewed": false`.
 
-Para cada item:
-1. Ler `questoes_raw.json` com `Read`
-2. Se o item tiver `contexto_pai_ref`, ler o item pai antes de rever o subitem
-3. Verificar: enunciado, alternativas, tipo, LaTeX, imagens referenciadas
-4. Corrigir diretamente em `questoes_raw.json` com `Edit` (campo a campo — não re-escrever o objeto inteiro)
-5. **Preencher categorização** para cada item (exceto `context_stem`) enquanto o conteúdo está fresco:
-   - `tema`: tema principal do currículo de Matemática A (ex: `"Funções"`, `"Geometria"`, `"Probabilidades"`, `"Trigonometria"`, `"Números complexos"`, `"Sucessões"`, `"Combinatória"`)
-   - `subtema`: subtema específico (ex: `"Funções trigonométricas"`, `"Geometria no espaço"`, `"Distribuição binomial"`)
-   - `descricao_breve`: frase curta (ex: `"Cálculo de probabilidade condicional"`)
-   - `tags`: lista de 3–5 strings (ex: `["probabilidade", "independência", "P(A∩B)"]`)
-6. Setar `"reviewed": true` no item
+Para cada item (incluindo `context_stem`):
+1. Ler `questoes_review.json` com `Read`
+2. Se o item tiver `id_contexto_pai`, localizar o `context_stem` correspondente antes de rever o subitem
+3. Verificar: enunciado, alternativas, tipografia PT («», …, diacríticos), imagens, notas de rodapé
+4. **Confirmar `tipo_item` e formato de resposta esperado** (ver 4.0) antes de categorizar
+5. Corrigir diretamente em `questoes_review.json` com `Edit` (campo a campo — não re-escrever o objeto inteiro)
+6. **Preencher categorização** para **todos** os itens, **inclusivamente os `context_stem`** (ver secção 4.1)
+7. Setar `"reviewed": true` no item
 
-Só avançar quando **todos** os itens tiverem `"reviewed": true`.
+### 4.0 Identificar tipo de questão e formato de resposta — obrigatório antes de categorizar
+
+O extractor atribui um `tipo_item` heurístico que frequentemente está **errado** em provas de Português. Confirmar com base no enunciado e corrigir antes de avançar.
+
+**Mapeamento (Exame 639):**
+
+| Sinal no enunciado | `tipo_item` correto | Campos exigidos |
+|--------------------|---------------------|-----------------|
+| "Na resposta a cada item, selecione a opção correta" / 4 alternativas A–D | `multiple_choice` | `alternativas` (A–D), sem `palavras_min/max` |
+| "Assinale, de entre as afirmações seguintes, a(s) verdadeira(s)" / lista I, II, III, IV, V | `multi_select` | `alternativas` em numeração romana, sem letra MC |
+| "Complete a tabela" / "Faça a correspondência entre…" | `complete_table` | imagem ou tabela markdown no enunciado |
+| "Explicite…", "Justifique…", "Explique…", "Relacione…" sem limite de palavras de redação | `open_response` | sem `palavras_min/max` |
+| "Redija um texto…" / "Numa exposição de 200 a 350 palavras…" | `essay` | `palavras_min`, `palavras_max` preenchidos |
+| Excerto, poema, texto expositivo, tema da dissertação | `context_stem` | sem pontuação, com `id_item` `I-ctx1` etc. |
+
+**Regras:**
+- Se o enunciado pede resposta escrita mas **não dá limite de palavras**, é `open_response` (não `essay`).
+- Se o enunciado usa numeração romana (I, II, III…) em afirmações para marcar V/F, é `multi_select` — **não** `multiple_choice`, mesmo que o extractor tenha posto letras A–D.
+- Se corrigires `tipo_item` aqui, anotar mentalmente para confirmar depois no critério correspondente (secção 6b.1).
+
+Só avançar quando **todos** os itens (incluindo os `context_stem`) tiverem `"reviewed": true` e estiverem categorizados.
 
 > ⚠️ `run_stage(stage='validate')` bloqueia se existirem itens com `"reviewed": false`.
+> ⚠️ `run_stage(stage='merge')` bloqueia se `tema`, `subtema`, `descricao_breve` ou `tags` faltarem em qualquer item (inclusive `context_stem`).
+
+### 4.1 Categorização específica de Português — seja granular, evite genérico
+
+**Regra fundamental:** não escrever apenas `tema: "Narrativa"` / `subtema: "Coração, Cabeça e Estômago"`. Essa categorização é demasiado genérica — perde-se o conteúdo específico que o item avalia. A categorização deve permitir a um professor encontrar rapidamente o item pelo conteúdo programático e pelas competências testadas.
+
+**Tema (domínio curricular + género/subdomínio):**
+Use a forma `"<Domínio> — <Género/Subdomínio>"`. Exemplos válidos:
+- `"Educação Literária — Narrativa do século XIX"`
+- `"Educação Literária — Poesia de Fernando Pessoa"`
+- `"Educação Literária — Sermão do Padre António Vieira"`
+- `"Educação Literária — Os Lusíadas"`
+- `"Educação Literária — Memorial do Convento"`
+- `"Leitura — Texto expositivo"`
+- `"Leitura — Texto argumentativo"`
+- `"Gramática — Sintaxe"`
+- `"Gramática — Semântica lexical"`
+- `"Gramática — Coesão textual"`
+- `"Escrita — Apreciação crítica"`
+- `"Escrita — Exposição sobre um tema"`
+- `"Oralidade — Compreensão"`
+
+**Subtema (obra + unidade específica ou, para gramática/escrita, o conteúdo preciso):**
+Obrigatório identificar a obra, o autor e o recorte concreto. Exemplos:
+- `"Camilo Castelo Branco, «Coração, Cabeça e Estômago» — caracterização do protagonista"`
+- `"Fernando Pessoa / Álvaro de Campos — heteronímia e fingimento poético"`
+- `"Padre António Vieira, «Sermão de Santo António aos Peixes» — alegoria e crítica social"`
+- `"Luís de Camões, «Os Lusíadas» — episódio da Despedida em Belém (Canto IV)"`
+- `"José Saramago, «Memorial do Convento» — relação Blimunda/Baltasar"`
+- `"Funções sintáticas — complemento oblíquo vs. modificador"`
+- `"Processos de coesão — coesão referencial (anáfora e catáfora)"`
+- `"Valor aspectual — aspeto imperfetivo/perfetivo"`
+
+**descricao_breve (frase curta que descreve a tarefa, não o tema):**
+Deve começar por verbo de tarefa (Explicar, Justificar, Identificar, Relacionar, Associar, Selecionar, Completar, Redigir…). Exemplos:
+- `"Explicitar a imagem ficcional construída pelo protagonista e a sua intenção."`
+- `"Identificar dois aspetos que evidenciam a caricatura do herói romântico."`
+- `"Explicar o papel da máscara na dualidade do sujeito poético."`
+- `"Associar afirmações sobre o poema à sua validade (verdadeiras/falsas)."`
+- `"Identificar a função sintática de um segmento sublinhado."`
+- `"Redigir uma exposição sobre a importância da memória na construção da identidade (200–350 palavras)."`
+
+**tags (5–8 strings específicas — conteúdos, recursos, conceitos):**
+Combinar: nome da obra/autor abreviado + competência + recurso expressivo/conteúdo linguístico concreto. Evitar tags vagas como `"interpretação"`, `"análise"`, `"português"`.
+
+Exemplos bem granulados:
+- Item I-1 sobre farsa em Coração, Cabeça e Estômago:
+  `["camilo castelo branco", "coração cabeça e estômago", "herói romântico", "caricatura", "ironia", "construção do protagonista", "farsa", "simulação"]`
+- Item I-4 sobre a máscara em Álvaro de Campos:
+  `["álvaro de campos", "modernismo", "heteronímia", "dualidade do sujeito poético", "máscara", "fingimento", "identidade", "símbolo"]`
+- Item I-6 multi_select sobre o poema:
+  `["álvaro de campos", "análise textual", "verso livre", "anáfora", "reticências", "ritmo", "verdadeiro/falso"]`
+- Item de gramática sobre função sintática:
+  `["gramática", "sintaxe", "função sintática", "complemento oblíquo", "modificador", "frase complexa"]`
+- Item III (essay) de apreciação crítica:
+  `["escrita", "apreciação crítica", "argumentação", "200-350 palavras", "tema: memória", "coesão textual"]`
+
+### 4.2 Categorização dos `context_stem`
+
+Os `context_stem` (id_item `I-ctx1`, `I-ctx2`, `II-ctx1`, `III-ctx1`, etc.) representam o excerto literário, o texto expositivo, o poema ou o tema da dissertação. **Também** devem ser categorizados:
+
+- `tema`: mesmo domínio que as questões filhas (ex: `"Educação Literária — Narrativa do século XIX"`, `"Leitura — Texto expositivo"`, `"Escrita — Apreciação crítica"`).
+- `subtema`: identificar obra + autor + recorte (para excertos literários) ou tipologia + tema (para textos expositivos e tema de dissertação).
+- `descricao_breve`: uma frase resumindo o conteúdo do texto-âncora (ex: `"Excerto sobre a transformação física do protagonista em herói romântico."`, `"Texto expositivo sobre o papel das bibliotecas públicas."`, `"Tema de dissertação: importância da memória coletiva."`).
+- `tags`: autor, obra, género, recursos dominantes, tema do texto.
+
+Exemplo para o excerto de Coração, Cabeça e Estômago (I-A-ctx):
+```json
+"tema": "Educação Literária — Narrativa do século XIX",
+"subtema": "Camilo Castelo Branco, «Coração, Cabeça e Estômago» — caricatura do herói romântico",
+"descricao_breve": "Excerto em que o narrador descreve a construção da sua imagem de herói romântico através de alterações físicas.",
+"tags": ["camilo castelo branco", "século XIX", "novela", "romantismo", "caricatura", "narrador autodiegético", "humor"]
+```
+
+Exemplo para o poema de Álvaro de Campos (I-B-ctx):
+```json
+"tema": "Educação Literária — Poesia de Fernando Pessoa",
+"subtema": "Álvaro de Campos — máscara e dualidade do sujeito poético",
+"descricao_breve": "Poema de Álvaro de Campos sobre o ato de retirar e voltar a pôr a máscara como metáfora da identidade.",
+"tags": ["fernando pessoa", "álvaro de campos", "modernismo", "heteronímia", "máscara", "dualidade", "fingimento", "verso livre"]
+```
 
 ---
 
@@ -209,6 +371,55 @@ run_stage(workspace="NOME", stage="cc", workspace_cc="NOME-CC-VD")
 5. Setar `"reviewed": true`
 
 **Não categorizar** no fluxo CC-VD.
+
+#### 6b.1 Match critério ↔ questão — obrigatório
+
+Cada critério em `criterios_raw.json` tem de ter uma questão correspondente em `../<workspace_principal>/questoes_review.json` com o **mesmo `id_item`**. Antes de marcar `"reviewed": true`:
+
+1. **Cobertura:** listar todos os `id_item` de `questoes_review.json` (excluindo `context_stem`) e confirmar que cada um tem um critério correspondente. Listar todos os `id_item` de `criterios_raw.json` e confirmar que cada um tem uma questão. Qualquer questão sem critério ou critério sem questão = bug a reportar.
+2. **Coerência de tipo:** ler o `tipo_item` da questão e confirmar que o critério usa o campo de resposta adequado (tabela abaixo).
+3. **Coerência de pontuação:** confirmar que a pontuação total do critério bate com o valor em `cotacoes_estrutura.json`.
+
+Para cada critério, ler também o `tipo_item` da questão correspondente em `../<workspace_principal>/questoes_review.json`. O extractor já bloqueia falsas classificações como `multiple_choice` para tipos não-MC, mas o agente deve **confirmar a coerência** e preencher a resposta no campo correcto:
+
+| `tipo_item` da questão | Campo de resposta | O que fazer |
+|------------------------|-------------------|-------------|
+| `multiple_choice` | `resposta_correta: "B"` | Confirmar letra A–D contra o PDF CC-VD. |
+| `multi_select` | `respostas_corretas: ["I","III","IV"]` | Ler `Read("provas fontes/<CC>.pdf", pages=N)` na página do item. Preencher com os algarismos romanos das afirmações verdadeiras. **Apagar** qualquer `resposta_correta` letra MC herdada (contaminação OCR). |
+| `complete_table` | `respostas_corretas: ["a→3","b→1","c→2"]` | Ler PDF; preencher pares chave→opção. **Apagar** `resposta_correta` se presente. |
+| `essay` | `parametros_classificacao` (no JSON da questão) | Confirmar Parâmetros A/B/C com níveis N5–N1. O critério não tem campo de resposta única. |
+| `open_response` | `criterios_parciais` + `solucao` | Verificar etapas e pontuação. |
+
+**Regra de ouro:** se o `tipo` no critério não bate com o `tipo_item` da questão, corrigir o `tipo` do critério primeiro e só depois extrair a resposta do PDF — nunca aceitar a letra MC herdada do extractor automático.
+
+> ⚠️ `cc_validate` rejeita o critério se: (a) `multi_select`/`complete_table` com `resposta_correta` MC presente, (b) `multi_select`/`complete_table` com `respostas_corretas` vazio, (c) `multi_select` com menos de 2 respostas.
+
+#### 6b.2 Critérios com duas versões de prova (Versão 1 / Versão 2) — manter apenas Versão 1
+
+Algumas provas (tipicamente itens `multi_select` e `complete_table`) apresentam **duas versões** no CC-VD, com gabaritos distintos. Exemplo:
+
+```
+6. ........................................................
+   Versão 1 – a) → 2; b) → 2
+   Versão 2 – a) → 1; b) → 3
+```
+
+```
+3. ........................................................
+   Versão 1 – I, II e IV
+   Versão 2 – II, III e V
+```
+
+**Regra absoluta:** considerar **apenas a Versão 1** e **apagar a Versão 2** dos critérios. O pipeline publica uma única versão da prova — a segunda versão geraria respostas duplicadas e inconsistentes no Supabase.
+
+Fluxo ao encontrar uma entrada com duas versões em `criterios_raw.json`:
+1. Identificar o par Versão 1 / Versão 2 no `bloco_ocr` ou `solucao` do item.
+2. Preencher `respostas_corretas` (ou `resposta_correta`, conforme o tipo) **só com os valores da Versão 1**.
+3. Remover da `solucao` e de qualquer campo auxiliar o texto referente à Versão 2 (linha inteira: `"Versão 2 – …"`).
+4. Se existir um marcador residual `"Versão 1 –"` no início, limpar o prefixo para deixar apenas o conteúdo canónico da resposta.
+5. Só depois marcar `"reviewed": true`.
+
+Nunca fundir as duas versões, nem preencher arrays com a união dos valores — isto corromperia o gabarito.
 
 ### 6c. Validar e fundir
 
