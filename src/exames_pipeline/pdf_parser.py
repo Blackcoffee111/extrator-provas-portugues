@@ -49,6 +49,15 @@ _FORMULARIO_HEADING_RE = re.compile(
 )
 # Qualquer cabeçalho markdown (# a ####) no início de linha
 _NEXT_HEADING_RE = re.compile(r"(?m)^#{1,4}\s+\S")
+# Nota de rodapé fundida: letra imediatamente seguida de dígito(s) não seguidos de letra/dígito.
+# Ex: "cabelos2 negros" → "cabelos² negros"; "tubérculos6," → "tubérculos⁶,". Aplica-se fora de math.
+_FUSED_SUPERSCRIPT_RE = re.compile(
+    r"([a-záàâãéêíóôõúçA-ZÁÀÂÃÉÊÍÓÔÕÚÇ])(\d+)"
+    r"(?=[^a-záàâãéêíóôõúçA-ZÁÀÂÃÉÊÍÓÔÕÚÇ\d]|$)"
+)
+_SUPERSCRIPT_DIGIT_MAP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+# Símbolo de ordinal (º/ª) — pode ser ordinal legítimo ou nota mal lida pelo OCR.
+_ORDINAL_SYMBOL_RE = re.compile(r"[ºª]")
 
 
 @dataclass(slots=True)
@@ -592,6 +601,13 @@ def _normalize_question_markers(markdown_text: str) -> str:
 
 
 _MATH_BLOCK_SPLIT_RE = re.compile(r"(\$\$[^$]*?\$\$|\$[^$\n]+?\$)", re.DOTALL)
+# Protege math blocks E links de imagem markdown (![alt](path)) de transformações de texto.
+_PROTECTED_BLOCK_RE = re.compile(
+    r"(\$\$[^$]*?\$\$"
+    r"|\$[^$\n]+?\$"
+    r"|!\[[^\]]*\]\([^)]+\))",
+    re.DOTALL,
+)
 
 
 def _apply_outside_math(text: str, pattern: re.Pattern, repl: str) -> str:
@@ -602,6 +618,18 @@ def _apply_outside_math(text: str, pattern: re.Pattern, repl: str) -> str:
         if i % 2 == 0:  # segmento fora de math — aplicar substituição
             result.append(pattern.sub(repl, part))
         else:  # bloco math — não tocar
+            result.append(part)
+    return "".join(result)
+
+
+def _apply_outside_protected(text: str, pattern: re.Pattern, repl) -> str:
+    """Como _apply_outside_math, mas também protege links de imagem markdown."""
+    parts = _PROTECTED_BLOCK_RE.split(text)
+    result = []
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            result.append(pattern.sub(repl, part))
+        else:
             result.append(part)
     return "".join(result)
 
@@ -648,6 +676,27 @@ def _normalize_text_artifacts(markdown_text: str) -> str:
     normalized = re.sub(r"(\S)[ \t]*•", r"\1\n•", normalized)
     # Pass 2: garantir espaço após bullet
     normalized = re.sub(r"•(?=[^\s])", "• ", normalized)
+
+    # Auto-corrigir notas de rodapé OCR: letra colada a dígito(s) não seguidos de letra/dígito.
+    # Ex: "cabelos2 negros" → "cabelos² negros"; "Fausto10." → "Fausto¹⁰."
+    # Usa _apply_outside_protected para não corromper hashes em caminhos de imagem.
+    normalized = _apply_outside_protected(
+        normalized,
+        _FUSED_SUPERSCRIPT_RE,
+        lambda m: m.group(1) + m.group(2).translate(_SUPERSCRIPT_DIGIT_MAP),
+    )
+
+    # Detectar símbolos de ordinal (º/ª) — podem ser ordinais legítimos ou
+    # notas de rodapé mal lidas; marcar para revisão manual.
+    _ordinal_lines = [
+        (i + 1, line.strip()[:80])
+        for i, line in enumerate(normalized.splitlines())
+        if _ORDINAL_SYMBOL_RE.search(line)
+    ]
+    if _ordinal_lines:
+        print(f"[pdf_parser] ⚠️  {len(_ordinal_lines)} linha(s) com símbolo ordinal (º/ª) — rever se são notas mal lidas:")
+        for _lineno, _excerpt in _ordinal_lines:
+            print(f"  linha {_lineno}: {_excerpt!r}")
 
     # Limpeza: remover espaços/tabs em branco no fim de linha (artefacto MinerU)
     # "candidatos eram violinistas; \n" → "candidatos eram violinistas;\n"

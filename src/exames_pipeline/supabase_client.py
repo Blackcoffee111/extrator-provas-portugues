@@ -397,8 +397,9 @@ def _question_to_row(
         "pool_opcional":            q.pool_opcional or None,
         "palavras_min":             q.palavras_min,
         "palavras_max":             q.palavras_max,
-        "linhas_referenciadas":     q.linhas_referenciadas or [],
-        "parametros_classificacao": q.parametros_classificacao or [],
+        # Só incluídos se não-vazios (requerem migração 003_portugues_fields.sql)
+        **( {"linhas_referenciadas":     q.linhas_referenciadas}     if q.linhas_referenciadas     else {} ),
+        **( {"parametros_classificacao": q.parametros_classificacao} if q.parametros_classificacao else {} ),
         # Metadados
         "pagina_origem": q.pagina_origem,
         "status":        q.status or "approved",

@@ -16,8 +16,6 @@ from .schemas import Question, dump_questions, load_questions
 
 
 def _needs_categorization(q: Question) -> bool:
-    if q.tipo_item == "context_stem":
-        return False
     return not (
         (q.tema or "").strip()
         and (q.subtema or "").strip()
@@ -44,8 +42,8 @@ def categorize_questions(settings, approved_path: Path) -> Path:
     questions = load_questions(approved_path)
 
     pending = [q for q in questions if _needs_categorization(q)]
-    done = sum(1 for q in questions if q.tipo_item != "context_stem" and not _needs_categorization(q))
-    total = sum(1 for q in questions if q.tipo_item != "context_stem")
+    done = sum(1 for q in questions if not _needs_categorization(q))
+    total = len(questions)
 
     if pending:
         print(f"[categorize] {done}/{total} questões já categorizadas.")

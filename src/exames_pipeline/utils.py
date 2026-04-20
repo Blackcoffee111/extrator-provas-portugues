@@ -15,8 +15,11 @@ _PARTE_HEADING_RE = re.compile(
     r"(?m)^#{1,3}\s*[Pp][Aa][Rr][Tt][Ee]\s+(?P<letra>[A-C])\b"
 )
 # Notas de rodapé do excerto: "¹ calamistrar – tornar crespo"  ou  "1 calamistrar – ..."
+# Requisitos: (1) traço separador (— ou – ou " - ") entre o termo e a definição;
+# (2) o texto antes do traço tem ≤40 chars e não contém ; : ( ) — exclui linhas de prosa longas
+# que contêm " - " incidentalmente (ex: "30 Telefones de...; sócio... - porque").
 _NOTA_RODAPE_RE = re.compile(
-    r"(?m)^(?P<num>[¹²³⁴⁵⁶⁷⁸⁹\d]{1,2})\s+(?P<texto>[A-ZÁÀÂÃÉÊÍÓÔÕÚÇa-záàâãéêíóôõúç].{5,}?)$"
+    r"(?m)^(?P<num>[¹²³⁴⁵⁶⁷⁸⁹\d]{1,2})\s+(?P<texto>[A-ZÁÀÂÃÉÊÍÓÔÕÚÇa-záàâãéêíóôõúç][^;:()\n]{0,38}(?:—|–| - )[^\n]+?)$"
 )
 # Marcador de item opcional (asterisco, ★, * no início da linha de questão)
 _OPCIONAL_MARKER_RE = re.compile(r"^\s*(?:\*\s*|\★\s*|\\bigstar\s*|\$\\(?:star|bigstar|ast)\$\s*)")
@@ -279,6 +282,50 @@ def extract_notas_rodape(text: str) -> list[dict]:
     return notas
 
 
+def strip_notas_section(text: str) -> str:
+    """Remove a secção de notas de rodapé do final do texto do excerto/poema.
+
+    Após extrair as notas com extract_notas_rodape, chama esta função para
+    limpar o enunciado — as notas ficam apenas em observacoes, não duplicadas
+    no corpo do texto.
+    """
+    lines = text.splitlines()
+    # Encontrar o primeiro índice de linha que é uma nota de rodapé
+    first_nota = None
+    for i, ln in enumerate(lines):
+        if _NOTA_RODAPE_RE.match(ln.strip()):
+            first_nota = i
+            break
+    if first_nota is None:
+        return text
+    # Manter tudo antes da primeira nota; remover linhas em branco antes dela
+    trimmed = "\n".join(lines[:first_nota]).rstrip()
+    return trimmed
+
+
+# Frases boilerplate que podem aparecer isoladas num preâmbulo de grupo/parte
+# e não devem originar um context_stem. Comparação literal após strip.
+_PT_PREAMBLE_BOILERPLATE: tuple[str, ...] = (
+    "Apresente as suas respostas de forma bem estruturada.",
+    "Para cada resposta, identifique o grupo e o item.",
+    "Utilize apenas caneta ou esferográfica de tinta azul ou preta.",
+    "Não é permitido o uso de corretor. Risque aquilo que pretende que não seja classificado.",
+    "Não é permitida a consulta de dicionário.",
+    "Apresente apenas uma resposta para cada item.",
+    "As cotações dos itens encontram-se no final do enunciado da prova.",
+)
+
+
+def _strip_pt_boilerplate(preamble: str) -> str:
+    """Remove frases boilerplate de instruções ao aluno no preâmbulo PT."""
+    cleaned = preamble
+    for phrase in _PT_PREAMBLE_BOILERPLATE:
+        cleaned = cleaned.replace(phrase, "")
+    # Colapsar linhas em branco e espaços resultantes
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def extract_pt_group_contexts(
     markdown_text: str,
     blocks: "list[MarkdownQuestionBlock]",
@@ -337,6 +384,7 @@ def extract_pt_group_contexts(
         preamble = markdown_text[text_start:preamble_end].strip()
         # Remover sub-cabeçalhos que possam ter ficado no intervalo
         preamble = re.sub(r"(?m)^#{1,4}[^\n]*\n?", "", preamble).strip()
+        preamble = _strip_pt_boilerplate(preamble)
         if len(preamble) > 30:
             result[(grupo, parte)] = preamble
 
@@ -349,6 +397,202 @@ def detect_partes(markdown_text: str) -> list[tuple[int, str]]:
         (m.start(), m.group("letra").upper())
         for m in _PARTE_HEADING_RE.finditer(markdown_text)
     ]
+
+
+# ---------------------------------------------------------------------------
+# Normalização de números de linha em preâmbulos de Português
+# ---------------------------------------------------------------------------
+# O MinerU pode OCRizar números de linha de um excerto/texto expositivo de
+# formas distintas:
+#   (a) "5 calamistrar" — sem ponto → sobrevive intacto ao splitter.
+#   (b) "5. No entanto" — com ponto → é visto pelo splitter como cabeçalho
+#       de questão e o prefixo "5. " é removido, perdendo-se o marcador.
+#   (c) "0 ser bela" — "10" partido pela quebra de coluna (dígito 1 sumiu).
+#   (d) "...máscara. 5 É-se... melhor. 10 Assim" — poema colapsado numa só
+#       linha com números de verso inline.
+#
+# Esta normalização corrige (b), (c) e (d) dentro de preâmbulos PT, antes
+# do splitter de blocos actuar. Nada inventa: apenas move ou tira caracteres
+# já presentes no markdown.
+
+_PT_LINE_NUM_WITH_DOT_RE = re.compile(
+    r"(?m)^(?P<num>5|10|15|20|25|30|35|40|45|50|55|60|65|70|75|80|85|90|95)"
+    r"\.\s+(?=[A-ZÁÀÂÃÉÊÍÓÔÕÚa-záàâãéêíóôõúç«])"
+)
+
+_PT_BROKEN_TEN_RE = re.compile(
+    r"(?m)^0\s+(?=[A-ZÁÀÂÃÉÊÍÓÔÕÚa-záàâãéêíóôõúç])"
+)
+
+_PT_INLINE_LINE_NUM_RE = re.compile(
+    r"(?<=[\.\!\?»…])\s+"
+    r"(?P<num>5|10|15|20|25|30|35|40|45|50|55|60|65|70|75|80|85|90|95)"
+    r"\s+(?=[A-ZÁÀÂÃÉÊÍÓÔÕÚÉ])"
+)
+
+# Marca o fim da zona de preâmbulo dentro de um grupo: "1. Texto..." em linha.
+_PT_FIRST_REAL_QUESTION_RE = re.compile(
+    r"(?m)^1\.\s+[A-ZÁÀÂÃÉÊÍÓÔÕÚ(«]"
+)
+
+
+def _fix_broken_tens(preamble: str) -> str:
+    """Repõe o dígito inicial truncado em '0 texto' → '10 texto', '20 texto', …
+
+    Usa os outros números já válidos no preâmbulo para inferir a progressão.
+    Só converte se for possível deduzir sem ambiguidade.
+    """
+    lines = preamble.splitlines(keepends=True)
+    known: list[tuple[int, int]] = []  # (idx_linha, valor)
+    for i, line in enumerate(lines):
+        m = re.match(r"^(\d{1,3})\s", line)
+        if m:
+            val = int(m.group(1))
+            if val % 5 == 0 and 5 <= val <= 99:
+                known.append((i, val))
+
+    if not known:
+        return preamble
+
+    out = list(lines)
+    for i, line in enumerate(lines):
+        if not re.match(r"^0\s", line):
+            continue
+        prev_val = next_val = None
+        for idx, val in known:
+            if idx < i:
+                prev_val = val
+            elif idx > i and next_val is None:
+                next_val = val
+                break
+        inferred: int | None = None
+        if prev_val is not None and next_val is not None and next_val - prev_val == 10:
+            inferred = prev_val + 5
+        elif prev_val is not None and prev_val % 10 == 5:
+            # progressão canónica 5 → 10, 15 → 20, …; '0' logo após "5" ou "15" é 10/20
+            inferred = prev_val + 5
+        elif next_val is not None and next_val % 10 == 5:
+            inferred = next_val - 5
+        if inferred is not None and inferred > 0 and inferred % 10 == 0:
+            out[i] = re.sub(r"^0\s", f"{inferred} ", line, count=1)
+    return "".join(out)
+
+
+_PT_PROSE_LINE_NUM_CANDIDATE_RE = re.compile(
+    r"(?<=\s)(?P<num>\d{1,2})(?=\s+[a-záàâãéêíóôõúçA-ZÁÀÂÃÉÊÍÓÔÕÚÇ«])"
+)
+
+
+def _restore_prose_line_numbers(preamble: str) -> str:
+    """Insere quebra de linha antes de números de verso fundidos em prosa.
+
+    Em excertos narrativos o OCR colapsa marcadores de linha (5, 10, 15, …)
+    no meio de frases porque as colunas PDF não têm pontuação a separá-los —
+    o detector `_break_inline_line_numbers` (pensado para poesia) não aplica
+    aqui. Esta heurística é conservadora:
+
+      * Só aceita múltiplos de 5 em [5, 95].
+      * O baseline é o primeiro múltiplo de 5 encontrado em início de linha
+        (não se assume que a numeração começa em 5 — em GRUPO II do texto
+        expositivo, pode começar em 15, por exemplo).
+      * Exige sequência monótona: só trata `N` como marcador se for o próximo
+        esperado (current+5) — avança pelo baseline dos já-em-início-de-linha.
+      * Não toca num número que já esteja em início de linha.
+    """
+    if not preamble:
+        return preamble
+    expected: int | None = None
+    out: list[str] = []
+    pos = 0
+    for m in _PT_PROSE_LINE_NUM_CANDIDATE_RE.finditer(preamble):
+        val = int(m.group("num"))
+        if val % 5 != 0 or val < 5 or val > 95:
+            continue
+        line_start = preamble.rfind("\n", 0, m.start()) + 1
+        at_line_start = preamble[line_start:m.start()].strip() == ""
+        if expected is None:
+            # Primeiro candidato define o baseline. Só aceitamos se estiver
+            # em início de linha (senão não há sinal de que é mesmo marcador).
+            if at_line_start:
+                expected = val + 5
+            continue
+        if val != expected:
+            continue
+        if at_line_start:
+            expected = val + 5
+            continue
+        out.append(preamble[pos:m.start()])
+        out.append("\n")
+        out.append(m.group("num"))
+        pos = m.end()
+        expected = val + 5
+    out.append(preamble[pos:])
+    return "".join(out)
+
+
+def _break_inline_line_numbers(preamble: str) -> str:
+    """Se uma mesma linha contiver ≥2 números de verso inline, insere '\\n' antes deles.
+
+    Evita falsos positivos (ex.: números isolados num texto em prosa) exigindo 2+
+    ocorrências na mesma linha física — padrão típico de poema colapsado.
+    """
+    out_lines: list[str] = []
+    for line in preamble.splitlines(keepends=True):
+        matches = list(_PT_INLINE_LINE_NUM_RE.finditer(line))
+        if len(matches) < 2:
+            out_lines.append(line)
+            continue
+        new_line = _PT_INLINE_LINE_NUM_RE.sub(
+            lambda m: f"\n{m.group('num')} ", line
+        )
+        out_lines.append(new_line)
+    return "".join(out_lines)
+
+
+def normalize_pt_preamble_line_numbers(markdown_text: str) -> str:
+    """Repara números de linha nos preâmbulos e excertos de provas PT.
+
+    Três correcções:
+      1. "N. TEXTO" com N múltiplo de 5 → "N TEXTO" — só dentro da zona de
+         preâmbulo (entre "# GRUPO X" e a 1.ª questão "1. …") e só se a zona
+         tiver ≥2 candidatos (evita atingir questões como "5. Depois…").
+      2. "0 TEXTO" → "10/20/… TEXTO" — restaura dígito truncado em quebra de
+         coluna, dentro da mesma zona.
+      3. Linha única com ≥2 números de verso inline → insere "\\n" antes de cada
+         (aplicada globalmente: o requisito de ≥2 ocorrências já evita falsos
+         positivos em prosa comum).
+    """
+    result = markdown_text
+
+    grupo_starts = [m.start() for m in _GRUPO_HEADING_RE.finditer(result)]
+    if grupo_starts:
+        boundaries = grupo_starts + [len(result)]
+        chunks: list[str] = [result[: boundaries[0]]]
+
+        for i in range(len(grupo_starts)):
+            group_start = boundaries[i]
+            group_end = boundaries[i + 1]
+            group_text = result[group_start:group_end]
+
+            q_match = _PT_FIRST_REAL_QUESTION_RE.search(group_text)
+            preamble_end = q_match.start() if q_match else len(group_text)
+            preamble = group_text[:preamble_end]
+            rest = group_text[preamble_end:]
+
+            dot_candidates = _PT_LINE_NUM_WITH_DOT_RE.findall(preamble)
+            if len(dot_candidates) >= 2:
+                preamble = _PT_LINE_NUM_WITH_DOT_RE.sub(
+                    lambda m: f"{m.group('num')} ", preamble
+                )
+            preamble = _fix_broken_tens(preamble)
+            preamble = _restore_prose_line_numbers(preamble)
+
+            chunks.append(preamble)
+            chunks.append(rest)
+        result = "".join(chunks)
+
+    result = _break_inline_line_numbers(result)
+    return result
 
 
 def block_requires_multimodal(markdown_block: str, context_images: list[str] | None = None) -> bool:
@@ -967,9 +1211,22 @@ def split_markdown_question_blocks(markdown_text: str) -> list[MarkdownQuestionB
     normalized = _normalize_heading_sequence([match.group("label") for match in matches])
     block_specs: list[tuple[int, int, str, int, str | None, str, bool]] = []
 
+    # Fronteiras estruturais (# GRUPO X, # PARTE A/B/C) para capar o fim de cada
+    # bloco de questão. Sem isto, a última questão de uma parte captura o preâmbulo
+    # inteiro da parte seguinte (poema, texto expositivo, etc.) até à próxima
+    # questão numerada.
+    _structural_boundaries = sorted(
+        [m.start() for m in _GRUPO_HEADING_RE.finditer(markdown_text)]
+        + [m.start() for m in _PARTE_HEADING_RE.finditer(markdown_text)]
+    )
+
     for index, match in enumerate(matches):
         start = match.start()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(markdown_text)
+        for _bpos in _structural_boundaries:
+            if start < _bpos < end:
+                end = _bpos
+                break
         if not markdown_text[start:end].strip():
             continue
         item_id, main_number, subitem, suspected_reset = normalized[index]

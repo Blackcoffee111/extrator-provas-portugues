@@ -730,7 +730,13 @@ def run_stage(
 
         if cc_st == "cc_fresh":
             # 1ª chamada: extrair critérios
-            result = _run(["cc-extract", str(prova_cc_md)])
+            cc_extract_args = ["cc-extract", str(prova_cc_md)]
+            # Cruzar tipo_item da prova principal — evita classificar multi_select
+            # como multiple_choice quando o OCR captura "Opção (X)" por engano.
+            questoes_review_path = _workspace_path(workspace) / "questoes_review.json"
+            if questoes_review_path.exists():
+                cc_extract_args.extend(["--questoes-review", str(questoes_review_path)])
+            result = _run(cc_extract_args)
             if result["ok"]:
                 ws_cc.transition_cc("cc_extracted")
                 # Verificar se há items flaggeados pelo lint OCR
@@ -1312,6 +1318,101 @@ def get_question_context(workspace: str, id_item: str, pad: int = 3) -> str:
     return (
         f"prova.md — linhas {line_start + 1}–{line_end} (item {id_item}):\n"
         + "\n".join(numbered)
+    )
+
+
+@mcp.tool()
+def get_context_stem_pdf_pages(workspace: str, id_item: str) -> str:
+    """Para um context_stem, devolve o caminho do PDF + excerto OCR + posição relativa.
+
+    Fluxo obrigatório de revisão de números de linha em context_stem:
+      1. Chamar esta tool com o id_item do context_stem (ex: "I-ctx1").
+      2. Abrir o PDF nas páginas indicadas com Read(file_path=<pdf>, pages="<N>-<M>").
+      3. Contar visualmente os marcadores de linha na margem do excerto.
+      4. Decidir tem_numeracao_linhas (true/false) e, se true, editar o enunciado
+         em questoes_review.json para ficar no formato canónico '\\n{N} …' — cada
+         marcador em início de linha próprio, seguido de um espaço e do conteúdo
+         daquela linha. Nunca deixar um número fundido ao texto ou inline no meio
+         de uma frase.
+      5. Marcar linhas_verificadas=true.
+
+    Args:
+        workspace: Nome do workspace (ex: "EX-Port639-F1-2024")
+        id_item:   ID do context_stem (ex: "I-ctx1", "II-ctx1")
+    """
+    ws_dir = _workspace_path(workspace)
+    prova_md = ws_dir / "prova.md"
+    pdf_path = ws_dir / "preprocessed_input.pdf"
+    if not prova_md.exists():
+        return f"❌ prova.md não encontrado em '{workspace}'."
+    if not pdf_path.exists():
+        return f"❌ preprocessed_input.pdf não encontrado em '{workspace}'."
+
+    source_span: dict | None = None
+    tipo_item: str | None = None
+    for fname in ("questoes_meta.json", "questoes_raw.json"):
+        path = ws_dir / fname
+        if not path.exists():
+            continue
+        try:
+            items = json.loads(path.read_text(encoding="utf-8"))
+            for item in items:
+                if str(item.get("id_item", "")) == id_item:
+                    source_span = item.get("source_span")
+                    tipo_item = item.get("tipo_item")
+                    break
+            if source_span is not None:
+                break
+        except Exception:
+            continue
+
+    if tipo_item is not None and tipo_item != "context_stem":
+        return (
+            f"❌ Item '{id_item}' não é context_stem (tipo={tipo_item}). "
+            "Esta tool só se aplica a context_stem."
+        )
+    if not source_span:
+        return f"❌ Item '{id_item}' não encontrado ou sem source_span em '{workspace}'."
+
+    lines = prova_md.read_text(encoding="utf-8").splitlines()
+    total_lines = len(lines) or 1
+    line_start = max(1, int(source_span.get("line_start", 1)))
+    line_end = max(line_start, int(source_span.get("line_end", line_start)))
+    frac_start = (line_start - 1) / total_lines
+    frac_end = line_end / total_lines
+
+    # Estimativa conservadora de páginas a abrir: assume distribuição uniforme
+    # do prova.md pelo PDF (heurística; o agente deve ajustar se bater vazio).
+    try:
+        from pypdf import PdfReader  # type: ignore
+        total_pages = len(PdfReader(str(pdf_path)).pages)
+    except Exception:
+        total_pages = 0
+
+    if total_pages:
+        pg_from = max(1, int(frac_start * total_pages) + 1 - 1)
+        pg_to = min(total_pages, int(frac_end * total_pages) + 1 + 1)
+        pages_hint = f"{pg_from}-{pg_to}" if pg_from != pg_to else f"{pg_from}"
+    else:
+        pages_hint = "?"
+
+    lo = max(0, line_start - 1 - 3)
+    hi = min(len(lines), line_end + 3)
+    excerpt = [f"{lo + i + 1:4d} | {ln}" for i, ln in enumerate(lines[lo:hi])]
+
+    return (
+        f"context_stem '{id_item}' em '{workspace}':\n"
+        f"  PDF:    {pdf_path}\n"
+        f"  Páginas prováveis (heurística): {pages_hint}  (de {total_pages or '?'} total)\n"
+        f"  prova.md linhas: {line_start}–{line_end} (de {total_lines})\n\n"
+        f"Fluxo obrigatório:\n"
+        f"  1. Read(file_path='{pdf_path}', pages='{pages_hint}')\n"
+        f"  2. Contar marcadores de linha na margem do excerto.\n"
+        f"  3. Editar questoes_review.json:\n"
+        f"       - enunciado no formato '\\n{{N}} …' para cada marcador\n"
+        f"       - tem_numeracao_linhas = true | false\n"
+        f"       - linhas_verificadas = true\n\n"
+        f"Excerto actual de prova.md:\n" + "\n".join(excerpt)
     )
 
 

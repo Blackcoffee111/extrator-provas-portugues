@@ -30,6 +30,8 @@ _CRITERIOS_ESPECIFICOS_RE = re.compile(
 )
 _FIRST_ITEM_RE = re.compile(r'(?m)^#{0,4}\s*1\.[ \t]+\d+\s*pontos')
 _COTACOES_TRUNCATE_RE = re.compile(r'(?m)^#{0,4}\s*COTA[ÇC][ÕO]ES\b', re.IGNORECASE)
+# Heading de grupo no markdown CC: "# GRUPO I", "## GRUPO II", etc.
+_GROUP_HEADING_RE = re.compile(r'(?m)^#{1,4}\s*GRUPO\s+([IVX]+)\b', re.IGNORECASE)
 
 # Cabeçalho de item no markdown gerado pelo MinerU:
 #   "1. 12 pontos Opção (C)"   →  MC numa só linha
@@ -55,6 +57,13 @@ _IMPLICIT_POINTS_HEADER_RE = re.compile(r'(?m)^#{0,4}\s*(\d+)\s*pontos\s*$')
 _MC_ANSWER_RE = re.compile(r'Op[çc][aã]o\s*\(\s*([A-D])\s*\)', re.IGNORECASE)
 # Caso 2: "(C)" isolado numa linha (sem "Opção") — comum em CC-VD 2024
 _MC_BARE_ANSWER_RE = re.compile(r'(?m)^[ \t]*\(\s*([A-D])\s*\)[ \t]*$')
+
+# Multi-select PT: deteção de respostas no formato "(I)(III)(IV)" ou "I, III, IV"
+# Procura sequências de algarismos romanos I-V, opcionalmente entre parêntesis,
+# separadas por vírgulas, " e ", ou justapostos.
+_MULTI_SELECT_ROMAN_RE = re.compile(
+    r'\(?\b(I{1,3}|IV|V)\b\)?'
+)
 
 # Referências a imagens no markdown: ![alt](path)
 _IMAGE_REF_RE = re.compile(r'!\[.*?\]\(([^)]+)\)')
@@ -202,6 +211,7 @@ class _CCBlock:
     id_item: str
     cotacao: int
     text: str
+    offset: int = 0   # posição inicial do bloco no texto original (para lookup de grupo)
 
 
 # ── Auto-correções LaTeX de alta confiança (Matemática A) ────────────────────
@@ -335,6 +345,7 @@ def _segment_blocks(
             id_item=m.group(1),
             cotacao=int(m.group(2)),
             text=text[m.end():end].strip(),
+            offset=m.start(),
         ))
 
     found_ids = {b.id_item for b in blocks}
@@ -372,6 +383,7 @@ def _segment_blocks(
             id_item=inferred_id,
             cotacao=int(m.group(1)),
             text=block_text,
+            offset=m.start(),
         ))
         found_ids.add(inferred_id)
         print(f"[cc_extract] 🔍 {inferred_id} detetado via cabeçalho implícito '{m.group(0).strip()}'")
@@ -401,6 +413,7 @@ def _segment_blocks(
                             id_item=plain_id,
                             cotacao=cotacao,
                             text=text[m.start():end].strip(),
+                            offset=m.start(),
                         ))
                         print(f"[cc_extract] 🔍 {plain_id} detetado via cabeçalho inline (pontos no corpo)")
 
@@ -408,17 +421,93 @@ def _segment_blocks(
 
 
 
-def extract_cc(settings: Settings, markdown_path: Path, fonte: str = "") -> Path:
+def _load_tipo_por_id(questoes_review_path: Path | None) -> dict[str, str]:
+    """Lê questoes_review.json (workspace principal) e devolve {id_item: tipo_item}.
+
+    As chaves são os `id_item` originais (com prefixo de grupo, ex.: "I-6", "II-3.1").
+    O caller é responsável por reconstruir o ID completo a partir do grupo do bloco
+    no markdown CC (que contém apenas IDs planos como "6" ou "3.1").
+    """
+    if not questoes_review_path or not questoes_review_path.exists():
+        return {}
+    try:
+        items = json.loads(questoes_review_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    out: dict[str, str] = {}
+    for it in items:
+        tid = (it.get("id_item") or "").strip()
+        tip = (it.get("tipo_item") or "").strip()
+        if tid and tip:
+            out[tid] = tip
+    return out
+
+
+def _build_group_index(text: str) -> list[tuple[int, str]]:
+    """Devolve [(offset, grupo)] ordenados — offset onde cada GRUPO X começa.
+
+    Permite localizar em que grupo cada bloco do markdown CC se insere,
+    procurando o último heading `# GRUPO X` antes do offset do bloco.
+    """
+    return [
+        (m.start(), m.group(1).upper())
+        for m in _GROUP_HEADING_RE.finditer(text)
+    ]
+
+
+def _grupo_em_offset(group_index: list[tuple[int, str]], offset: int) -> str:
+    """Encontra o último GRUPO X cujo offset precede `offset`. '' se nenhum."""
+    grupo = ""
+    for off, g in group_index:
+        if off <= offset:
+            grupo = g
+        else:
+            break
+    return grupo
+
+
+def _parse_multi_select_answers(text: str) -> list[str]:
+    """Extrai uma lista de algarismos romanos (I–V) de um bloco curto de CC.
+
+    Heurística conservadora: só devolve lista se encontrar pelo menos 2 ocorrências
+    e se o bloco for curto (típico de respostas de multi_select). Devolução vazia
+    sinaliza que o agente tem de extrair manualmente do PDF.
+    """
+    # Limitar a primeiras 3 linhas não vazias — respostas costumam estar no topo
+    head = "\n".join([l for l in text.splitlines() if l.strip()][:3])
+    candidatos = _MULTI_SELECT_ROMAN_RE.findall(head)
+    # Filtrar duplicados preservando ordem
+    seen: set[str] = set()
+    unicos: list[str] = []
+    for c in candidatos:
+        if c not in seen:
+            seen.add(c)
+            unicos.append(c)
+    return unicos if len(unicos) >= 2 else []
+
+
+def extract_cc(
+    settings: Settings,
+    markdown_path: Path,
+    fonte: str = "",
+    questoes_review_path: Path | None = None,
+) -> Path:
     """
     Lê o markdown gerado pelo MinerU para um CC-VD e extrai critérios estruturados.
 
     Entrada : prova.md (gerado por `exames_pipeline extract <cc_pdf> --no-preprocess`)
     Saída   : criterios_raw.json no mesmo directório
+
+    Se `questoes_review_path` for fornecido, o tipo de cada questão é cruzado
+    com o critério: tipos `multi_select`, `complete_table` e `essay` nunca são
+    classificados como `multiple_choice`, evitando contaminação por OCR (ex:
+    `Opção (B)` capturado erradamente para um item multi_select).
     """
     markdown_path = markdown_path.resolve()
     output_dir = markdown_path.parent
     resolved_fonte = fonte or infer_fonte_from_path(markdown_path)
     is_pt = "portugu" in resolved_fonte.lower() or "portugu" in str(markdown_path).lower()
+    tipo_por_id = _load_tipo_por_id(questoes_review_path)
 
     markdown = markdown_path.read_text(encoding="utf-8")
     text = _find_criterios_especificos(markdown)
@@ -434,6 +523,7 @@ def extract_cc(settings: Settings, markdown_path: Path, fonte: str = "") -> Path
             pass
 
     blocks = _segment_blocks(text, expected_cotacoes=expected_cotacoes)
+    group_index = _build_group_index(text)
 
     if not blocks:
         print("[cc_extract] ⚠️  Nenhum cabeçalho de item encontrado. "
@@ -446,15 +536,84 @@ def extract_cc(settings: Settings, markdown_path: Path, fonte: str = "") -> Path
     for block in blocks:
         block.text, auto_fixes = _auto_correct(block.text, is_pt=is_pt)
         imagens = _IMAGE_REF_RE.findall(block.text)
+
+        # Cruzamento com o tipo_item da questão (workspace principal)
+        # O markdown CC usa IDs planos ("6"); compor o ID completo via grupo ("I-6").
+        grupo_atual = _grupo_em_offset(group_index, block.offset)
+        id_completo = f"{grupo_atual}-{block.id_item}" if grupo_atual else block.id_item
+        tipo_questao = tipo_por_id.get(id_completo) or tipo_por_id.get(block.id_item)
+        # Em PT, prefixar o id_item do critério com o grupo elimina colisões
+        # entre I-6 e II-6 (ambos com id plano "6" no markdown CC).
+        if is_pt and grupo_atual:
+            block.id_item = id_completo
+        # Tipos não-MC: nunca aceitar "Opção (X)" como resposta
+        tipo_forca_nao_mc = tipo_questao in {"multi_select", "complete_table", "essay"}
+
         # Caso 1: "Opção (X)" explícito
-        mc_match = _MC_ANSWER_RE.search(block.text)
+        mc_match = None if tipo_forca_nao_mc else _MC_ANSWER_RE.search(block.text)
         # Caso 2: "(X)" isolado numa linha (sem prefixo "Opção")
-        if not mc_match:
+        if not mc_match and not tipo_forca_nao_mc:
             mc_match = _MC_BARE_ANSWER_RE.search(block.text)
         mc_letter = (
             mc_match.group(1).upper() if mc_match
-            else mc_preamble_map.get(block.id_item)
+            else (None if tipo_forca_nao_mc else mc_preamble_map.get(block.id_item))
         )
+
+        # Ramo dedicado para multi_select / complete_table / essay
+        if tipo_forca_nao_mc:
+            obs = [
+                f"Tipo da questão é '{tipo_questao}': resposta requer extração manual do PDF CC-VD."
+            ]
+            obs += [f"[auto-fix] {f}" for f in auto_fixes]
+            respostas: list[str] = []
+            criterios_parciais: list[dict] = []
+            if tipo_questao == "multi_select":
+                respostas = _parse_multi_select_answers(block.text)
+                if respostas:
+                    obs.append(
+                        f"Respostas multi_select extraídas heuristicamente: {respostas} — confirmar contra o PDF."
+                    )
+            elif tipo_questao == "essay":
+                # tentar extrair níveis de desempenho (mesmo caminho do open_response PT)
+                if _NIVEL_DESEMPENHO_RE.search(block.text):
+                    niveis = _parse_niveis_desempenho(block.text)
+                    criterios_parciais = [
+                        {"nivel": n["nivel"], "pontos": n["pontos"], "descricao": n["descritor"]}
+                        for n in niveis
+                    ]
+            criterio = CriterioRaw(
+                id_item=block.id_item,
+                cotacao_total=block.cotacao,
+                tipo=tipo_questao,
+                resposta_correta=None,
+                solucao=block.text,
+                criterios_parciais=criterios_parciais,
+                resolucoes_alternativas=[],
+                status="pending_review",
+                texto_original=block.text,
+                fonte=resolved_fonte,
+                imagens=imagens,
+                contexto="",
+                observacoes=obs,
+                respostas_corretas=respostas,
+            )
+            print(f"[cc_extract] ⚠️  {block.id_item} ({tipo_questao}) → pending_review (resposta requer PDF CC-VD)")
+            criterios.append(criterio)
+            traces.append(
+                {
+                    "id_item": criterio.id_item,
+                    "cotacao_total": criterio.cotacao_total,
+                    "tipo_inferido": criterio.tipo,
+                    "status_inicial": criterio.status,
+                    "ocr_tem_opcao_inline": False,
+                    "ocr_tem_resposta_mc": False,
+                    "n_criterios_parciais": len(criterio.criterios_parciais),
+                    "n_resolucoes_alternativas": 0,
+                    "n_respostas_corretas": len(criterio.respostas_corretas),
+                    "criterio": criterio.to_dict(),
+                }
+            )
+            continue
 
         if mc_letter:
             obs = [] if mc_match else ["Resposta MC extraída do preâmbulo (não estava inline)"]

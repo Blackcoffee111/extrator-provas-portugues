@@ -31,12 +31,14 @@ class Question:
     imagens_contexto: list[str] = field(default_factory=list)
     pagina_origem: int | None = None
     resposta_correta: str | None = None
+    respostas_corretas: list[str] = field(default_factory=list)
     fonte: str = ""
     status: str = "pending_review"
     observacoes: list[str] = field(default_factory=list)
     texto_original: str = ""
     source_span: dict[str, int] | None = None
     enunciado_contexto_pai: str = ""
+    id_contexto_pai: str = ""   # ID do context_stem pai (ex: "I-ctx1", "II-ctx1")
     grupo_ids: list[str] = field(default_factory=list)
     descricoes_imagens: dict[str, str] = field(default_factory=dict)
     descricao_breve: str = ""
@@ -44,6 +46,7 @@ class Question:
     criterios_parciais: list[dict] = field(default_factory=list)
     resolucoes_alternativas: list[str] = field(default_factory=list)
     grupo: str = ""          # "I", "II", … — vazio quando a prova não tem grupos
+    parte: str = ""          # "A", "B", "C" — vazio quando o grupo não tem partes
     reviewed: bool = False   # True após o agente rever e aprovar o item
     # ── Campos específicos de Português ──────────────────────────────────────
     pool_opcional: str = ""              # "I-opt", "II-opt"; vazio = item obrigatório
@@ -53,6 +56,13 @@ class Question:
     # Parâmetros A/B/C da dissertação:
     # [{"parametro":"A","nome":"Conteúdo","niveis":[{"nivel":"N5","pontos":12,"descritor":"..."}]}]
     parametros_classificacao: list[dict] = field(default_factory=list)
+    # Gate de numeração de linhas em context_stem (Português).
+    # None = por verificar; True = texto tem marcadores de linha formatados;
+    # False = texto não tem numeração. Obrigatório preencher antes do validate.
+    tem_numeracao_linhas: bool | None = None
+    # True só depois de o agente conferir o PDF original e aplicar o formato canónico
+    # ("\n{N} " em início de linha) a todos os marcadores presentes.
+    linhas_verificadas: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -93,12 +103,14 @@ class Question:
             imagens_contexto=list(data.get("imagens_contexto", [])),
             pagina_origem=data.get("pagina_origem"),
             resposta_correta=data.get("resposta_correta"),
+            respostas_corretas=list(data.get("respostas_corretas", [])),
             fonte=data.get("fonte", ""),
             status=data.get("status", "pending_review"),
             observacoes=list(data.get("observacoes", [])),
             texto_original=data.get("texto_original", ""),
             source_span=data.get("source_span"),
             enunciado_contexto_pai=data.get("enunciado_contexto_pai", ""),
+            id_contexto_pai=data.get("id_contexto_pai", ""),
             grupo_ids=list(data.get("grupo_ids", [])),
             descricoes_imagens=dict(data.get("descricoes_imagens", {})),
             descricao_breve=data.get("descricao_breve", ""),
@@ -106,12 +118,15 @@ class Question:
             criterios_parciais=list(data.get("criterios_parciais", [])),
             resolucoes_alternativas=list(data.get("resolucoes_alternativas", [])),
             grupo=data.get("grupo", ""),
+            parte=data.get("parte", ""),
             reviewed=reviewed,
             pool_opcional=data.get("pool_opcional", ""),
             palavras_min=data.get("palavras_min"),
             palavras_max=data.get("palavras_max"),
             linhas_referenciadas=list(data.get("linhas_referenciadas", [])),
             parametros_classificacao=list(data.get("parametros_classificacao", [])),
+            tem_numeracao_linhas=data.get("tem_numeracao_linhas"),
+            linhas_verificadas=bool(data.get("linhas_verificadas", False)),
         )
 
 
@@ -172,6 +187,7 @@ REVIEW_FIELDS: frozenset[str] = frozenset({
     "enunciado",             # texto a rever/corrigir
     "alternativas",          # opções MC
     "resposta_correta",      # GRUPO I MC — agente preenche
+    "respostas_corretas",    # multi_select / complete_table — agente preenche (lista)
     "tema",                  # categorização
     "subtema",               # categorização
     "descricao_breve",       # categorização
@@ -180,7 +196,9 @@ REVIEW_FIELDS: frozenset[str] = frozenset({
     "reviewed",              # gate do validate
     "imagens",               # refs de imagens a verificar
     "enunciado_contexto_pai",# contexto do group stem para subitens
+    "id_contexto_pai",        # ID do context_stem pai (ex: "I-ctx1")
     "grupo",                 # "I", "II", "III"
+    "parte",                 # "A", "B", "C" (só GRUPO I em provas PT)
     "solucao",               # questões abertas / dissertação
     # Campos Português
     "pool_opcional",         # "I-opt", "II-opt" ou vazio
@@ -188,6 +206,8 @@ REVIEW_FIELDS: frozenset[str] = frozenset({
     "palavras_max",          # Grupo III
     "linhas_referenciadas",  # ["16", "29-30"] — linhas citadas no enunciado
     "parametros_classificacao",  # parâmetros A/B/C dissertação
+    "tem_numeracao_linhas",  # context_stem: True/False/null — agente decide
+    "linhas_verificadas",    # context_stem: gate obrigatório após conferir PDF
 })
 
 
@@ -244,7 +264,7 @@ class CriterioRaw:
     """Critério de classificação extraído do PDF CC-VD, antes do merge com questões."""
     id_item: str                                    # "1", "4.1", "5.2"
     cotacao_total: int                              # pontuação total do item
-    tipo: str                                       # "multiple_choice" | "open_response"
+    tipo: str                                       # "multiple_choice" | "open_response" | "multi_select" | "complete_table" | "essay"
     resposta_correta: str | None                    # "B" para MC; None para aberta
     solucao: str                                    # solução completa LaTeX/Markdown
     criterios_parciais: list[dict]                  # [{"pontos": N, "descricao": "..."}]
@@ -256,6 +276,7 @@ class CriterioRaw:
     imagens: list[str] = field(default_factory=list)  # paths das imagens referenciadas no bloco
     contexto: str = ""                              # texto introdutório antes do primeiro processo
     reviewed: bool = False   # True após o agente rever e aprovar o critério
+    respostas_corretas: list[str] = field(default_factory=list)  # multi_select: ["I","III","IV"]; complete_table: pares chave→opção
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -281,6 +302,7 @@ class CriterioRaw:
             imagens=list(data.get("imagens", [])),
             contexto=data.get("contexto", ""),
             reviewed=reviewed,
+            respostas_corretas=list(data.get("respostas_corretas", [])),
         )
 
 

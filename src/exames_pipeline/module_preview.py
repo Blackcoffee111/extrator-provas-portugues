@@ -111,13 +111,25 @@ def _md_to_html(text: str) -> str:
 # ── Render de contexto PT (excerto com linhas numeradas + notas de rodapé) ────
 
 _LINE_NUM_PREFIX_RE = re.compile(r"^(\d{1,3})\s+(.+)$")
+# Múltiplos de 5 são o padrão de numeração de excertos PT (5, 10, 15, 20...)
+_MULT5_PREFIX_RE = re.compile(r"^(\d{1,3})\s+")
 
 
 def _render_context_text(text: str, notas_rodape: list[dict] | None = None) -> str:
-    """Renderiza texto de contexto, detectando linhas numeradas estilo PT."""
+    """Renderiza texto de contexto PT: excerto numerado, poema centrado ou prosa livre."""
     lines = text.splitlines()
-    numbered = [_LINE_NUM_PREFIX_RE.match(ln) for ln in lines if ln.strip()]
-    use_numbers = sum(1 for m in numbered if m) >= max(3, len(lines) // 2)
+    non_empty = [ln.strip() for ln in lines if ln.strip()]
+
+    # Poema: preamble anuncia "Leia o poema" nas primeiras 3 linhas não-vazias
+    is_poem = any("leia o poema" in ln.lower() for ln in non_empty[:3])
+
+    # Excerto numerado: ≥2 linhas começam com múltiplo de 5 (5, 10, 15, 20...)
+    # Evita falsos positivos de notas de rodapé (1, 2, 3...) e números ordinários.
+    mult5_count = sum(
+        1 for ln in non_empty
+        if (m := _MULT5_PREFIX_RE.match(ln)) and int(m.group(1)) % 5 == 0 and int(m.group(1)) <= 200
+    )
+    use_numbers = mult5_count >= 2
 
     if use_numbers:
         rows = ""
@@ -127,7 +139,8 @@ def _render_context_text(text: str, notas_rodape: list[dict] | None = None) -> s
                 rows += '<div class="context-line"><span class="line-num"></span><span class="line-text">&nbsp;</span></div>'
                 continue
             m = _LINE_NUM_PREFIX_RE.match(stripped)
-            if m:
+            # Mostrar número apenas se for múltiplo de 5 (marcadores de linha PT)
+            if m and int(m.group(1)) % 5 == 0:
                 num, content = m.group(1), m.group(2)
                 rows += (f'<div class="context-line">'
                          f'<span class="line-num">{html.escape(num)}</span>'
@@ -139,6 +152,15 @@ def _render_context_text(text: str, notas_rodape: list[dict] | None = None) -> s
                          f'<span class="line-text">{html.escape(stripped)}</span>'
                          f'</div>')
         body = f'<div class="context-lines">{rows}</div>'
+    elif is_poem:
+        rows = ""
+        for ln in lines:
+            stripped = ln.strip()
+            if not stripped:
+                rows += '<div class="poem-stanza-break"></div>'
+            else:
+                rows += f'<div class="poem-line">{html.escape(stripped)}</div>'
+        body = f'<div class="poem-lines">{rows}</div>'
     else:
         body = _md_to_html(text)
 
@@ -156,9 +178,9 @@ def _render_context_text(text: str, notas_rodape: list[dict] | None = None) -> s
 def _extract_notas_rodape_from_obs(observacoes: list[str]) -> list[dict]:
     """Extrai notas_rodape guardadas em observacoes como JSON."""
     for obs in observacoes:
-        if obs.startswith("notas_rodape:"):
+        if obs.startswith("[notas_rodape] "):
             try:
-                return json.loads(obs[len("notas_rodape:"):].strip())
+                return json.loads(obs[len("[notas_rodape] "):].strip())
             except (json.JSONDecodeError, ValueError):
                 pass
     return []
@@ -468,8 +490,9 @@ def _render_question(q: Question, index: int, show_context: bool = True, overrid
     descricao_html = (f'<p class="descricao-breve">{html.escape(q.descricao_breve)}</p>'
                       if q.descricao_breve else "")
     meta = ""
-    if q.materia:
-        meta = (f'<span class="meta-item">📚 {html.escape(q.materia)}</span>'
+    effective_materia = q.materia or ("Português" if "portugu" in str(q.fonte or "").lower() or "port639" in str(q.fonte or "").lower() else "")
+    if effective_materia:
+        meta = (f'<span class="meta-item">📚 {html.escape(effective_materia)}</span>'
                 f'<span class="meta-item">📂 {html.escape(q.tema or "")}</span>'
                 f'<span class="meta-item">🔖 {html.escape(q.subtema or "")}</span>')
     tags = " ".join(f'<span class="tag">#{t.lstrip("#")}</span>' for t in (q.tags or []))
@@ -599,10 +622,16 @@ h1 {{ font-size: 1.5rem; margin-bottom: .25rem; color: #0f172a; }}
 
 /* Notas de rodapé PT */
 .notas-rodape  {{ margin-top: .75rem; padding-top: .6rem; border-top: 1px solid #e2e8f0;
-                  font-size: .78rem; color: #64748b; }}
+                  font-size: .78rem; color: #64748b; text-align: left; }}
 .notas-rodape-label {{ font-weight: 700; font-size: .7rem; text-transform: uppercase;
                        letter-spacing: .04em; margin-bottom: .3rem; color: #94a3b8; }}
 .nota-rodape   {{ line-height: 1.5; margin-bottom: .2rem; }}
+
+/* Poema centrado PT */
+.poem-lines        {{ text-align: center; font-style: italic; line-height: 1.9;
+                      margin: .5rem 0 .75rem; font-size: .92rem; }}
+.poem-line         {{ margin: 0; }}
+.poem-stanza-break {{ height: .8rem; }}
 
 /* Edit button */
 .edit-btn {{
@@ -1179,33 +1208,41 @@ setInterval(pollOverlayVersion, 10000);
 
 # ── Renderização agrupada por Grupo/Parte (Português) ────────────────────────
 
+def _infer_id_contexto_pai_by_position(
+    grupo_items: list[tuple[Question, dict]],
+) -> dict[str, str]:
+    """Retrocompatibilidade: quando id_contexto_pai está vazio, infere pelo stem precedente.
+
+    Itera os itens do grupo na ordem de documento e atribui o último stem visto
+    a cada questão não-stem que não tenha id_contexto_pai preenchido.
+    """
+    inferred: dict[str, str] = {}  # id_item → id_item_do_stem
+    active_stem = ""
+    for q, _ in grupo_items:
+        if q.tipo_item == "context_stem":
+            active_stem = q.id_item or ""
+        elif not (q.id_contexto_pai or ""):
+            inferred[q.id_item or ""] = active_stem
+    return inferred
+
+
 def _build_pt_grouped_html(
     paired: list[tuple[Question, dict]],
 ) -> str:
-    """Renderiza questões PT agrupadas por GRUPO e PARTE.
+    """Renderiza questões PT agrupadas por GRUPO, usando id_contexto_pai para a árvore.
 
-    context_stem cards aparecem no topo de cada grupo/parte.
-    Questões regulares nunca mostram enunciado_contexto_pai (está no stem acima).
+    Para cada grupo:
+      - Para cada context_stem (ordenado por ordem_item), renderiza o stem e depois
+        todas as questões filhas (id_contexto_pai == stem.id_item).
+      - Questões sem id_contexto_pai (ex: dissertação sem preâmbulo) renderizam após
+        todos os stems do grupo.
+
+    Retrocompatível: se id_contexto_pai estiver vazio, infere pelo stem precedente
+    para workspaces gerados antes desta mudança.
     """
+    import html as _html
     _GRUPO_ORDER = {"I": 0, "II": 1, "III": 2, "IV": 3, "V": 4}
 
-    # Separar context_stems de questões por chave (grupo, parte)
-    stems: dict[tuple[str, str], list[tuple[Question, dict]]] = {}
-    regulares: dict[tuple[str, str], list[tuple[Question, dict]]] = {}
-    for q, ov in paired:
-        if q.tipo_item == "context_stem":
-            # Determinar parte a partir de id_item: "I-A-ctx" → parte="A"; "I-ctx" → parte=""
-            parts = q.id_item.split("-")
-            parte = parts[1] if len(parts) == 3 and parts[1] in ("A", "B", "C") else ""
-            key = (q.grupo, parte)
-            stems.setdefault(key, []).append((q, ov))
-        else:
-            parts = q.id_item.split("-")
-            parte = parts[1] if len(parts) >= 3 and parts[1] in ("A", "B", "C") else ""
-            key = (q.grupo, parte)
-            regulares.setdefault(key, []).append((q, ov))
-
-    # Todos os grupos presentes, ordenados
     all_grupos = sorted(
         {q.grupo for q, _ in paired if q.grupo},
         key=lambda g: _GRUPO_ORDER.get(g, 9),
@@ -1213,38 +1250,53 @@ def _build_pt_grouped_html(
 
     html_parts: list[str] = []
     idx = 0
+
     for grupo in all_grupos:
-        html_parts.append(f'<div class="grupo-section" data-grupo="{html.escape(grupo)}">')
-        html_parts.append(f'<div class="grupo-header">Grupo {html.escape(grupo)}</div>')
+        html_parts.append(f'<div class="grupo-section" data-grupo="{_html.escape(grupo)}">')
+        html_parts.append(f'<div class="grupo-header">Grupo {_html.escape(grupo)}</div>')
 
-        # Stem de grupo ("I-ctx", "II-ctx", "III-ctx")
-        for stem_q, stem_ov in stems.get((grupo, ""), []):
+        grupo_items = [(q, ov) for q, ov in paired if q.grupo == grupo]
+
+        # Separar stems e questões regulares
+        stems_in_grupo = [
+            (q, ov) for q, ov in grupo_items if q.tipo_item == "context_stem"
+        ]
+        regular_in_grupo = [
+            (q, ov) for q, ov in grupo_items if q.tipo_item != "context_stem"
+        ]
+
+        # Retrocompatibilidade: inferir pai por posição quando id_contexto_pai vazio
+        inferred_pai = _infer_id_contexto_pai_by_position(grupo_items)
+
+        # Indexar questões por pai (usa id_contexto_pai ou inferência por posição)
+        children_by_stem: dict[str, list[tuple[Question, dict]]] = {
+            (q.id_item or ""): [] for q, _ in stems_in_grupo
+        }
+        orphans: list[tuple["Question", dict]] = []  # sem stem (ex: III-1 essay)
+        for q, ov in regular_in_grupo:
+            pai = q.id_contexto_pai or inferred_pai.get(q.id_item or "", "")
+            if pai and pai in children_by_stem:
+                children_by_stem[pai].append((q, ov))
+            else:
+                orphans.append((q, ov))
+
+        # Renderizar cada stem seguido das suas filhas
+        for stem_q, stem_ov in stems_in_grupo:
             idx += 1
+            html_parts.append(
+                f'<div class="stem-block" data-stem="{_html.escape(stem_q.id_item or "")}">'
+            )
             html_parts.append(_render_question(stem_q, idx, show_context=False, overrides=stem_ov))
-
-        # Partes dentro deste grupo
-        partes_presentes = sorted(
-            {p for (g, p) in list(stems.keys()) + list(regulares.keys()) if g == grupo and p},
-        )
-
-        if partes_presentes:
-            for parte in partes_presentes:
-                html_parts.append(f'<div class="parte-section" data-parte="{html.escape(parte)}">')
-                html_parts.append(f'<div class="parte-header">Parte {html.escape(parte)}</div>')
-                # Stem de parte ("I-A-ctx", …)
-                for stem_q, stem_ov in stems.get((grupo, parte), []):
-                    idx += 1
-                    html_parts.append(_render_question(stem_q, idx, show_context=False, overrides=stem_ov))
-                # Questões da parte
-                for reg_q, reg_ov in regulares.get((grupo, parte), []):
-                    idx += 1
-                    html_parts.append(_render_question(reg_q, idx, show_context=False, overrides=reg_ov))
-                html_parts.append("</div>")
-        else:
-            # Grupo sem subdivisão de partes (GRUPO II, III)
-            for reg_q, reg_ov in regulares.get((grupo, ""), []):
+            stem_key = stem_q.id_item or ""
+            for child_q, child_ov in children_by_stem.get(stem_key, []):
                 idx += 1
-                html_parts.append(_render_question(reg_q, idx, show_context=False, overrides=reg_ov))
+                html_parts.append(_render_question(child_q, idx, show_context=False, overrides=child_ov))
+            html_parts.append("</div>")
+
+        # Questões órfãs do grupo (sem stem associado)
+        for q, ov in orphans:
+            idx += 1
+            html_parts.append(_render_question(q, idx, show_context=False, overrides=ov))
 
         html_parts.append("</div>")
 
@@ -1310,20 +1362,42 @@ def _build_html(
     overlay_path = ws_dir / "correcoes_humanas.json"
     initial_version_ms = int(overlay_path.stat().st_mtime * 1000) if overlay_path.exists() else 0
 
-    def _sort_key(s: str) -> tuple:
-        # Separa prefixo de grupo ("I", "II") do resto para evitar comparação str/int.
-        # Usa zero-padding em números para ordenação lexicográfica correcta.
-        # Ex: "II-2.1" → ("II", "002", "001"); "3" → ("", "003"); "2.1" → ("", "002", "001")
+    def _sort_key(q: Question) -> tuple:
+        # 1. Grupo (I, II, III...)
+        grupo_order = {"I": 0, "II": 1, "III": 2, "IV": 3, "V": 4}
+        g_val = grupo_order.get(q.grupo or "", 9)
+        
+        # 2. Tipo (Stem primeiro no seu grupo/parte)
+        is_stem = 0 if q.tipo_item == "context_stem" else 1
+        
+        # 3. Ordem explícita se existir (fallback largo)
+        order_idx = q.ordem_item if q.ordem_item is not None else 999
+        
+        # 4. Natural sort do ID (ex: I-A-1 -> [A, 1])
+        s = q.id_item or str(q.numero_questao)
         import re as _re
-        m = _re.match(r"^([IVX]+)-(.+)$", s)
-        grupo_part = m.group(1) if m else ""
-        rest       = m.group(2) if m else s
-        parts      = rest.replace(".", " ").split()
-        return (grupo_part,) + tuple(p.zfill(3) if p.isdigit() else p for p in parts)
+        # Remove prefixo de grupo repetido para focar na parte/número
+        rest = _re.sub(r"^[IVX]+-", "", s)
+        parts = _re.split(r"[-. ]", rest)
+        
+        natural_parts = []
+        for p in parts:
+            if not p: continue
+            if p.isdigit():
+                natural_parts.append(int(p))
+            else:
+                # Divide "ctx1" em ["ctx", 1] para natural sort
+                subparts = _re.findall(r"\d+|\D+", p)
+                for sp in subparts:
+                    if sp.isdigit(): natural_parts.append(int(sp))
+                    else: natural_parts.append(sp)
 
-    # Ordenar mantendo overrides associados
+        # Retorna tuplo de ordenação: Grupo -> Stem-Priority -> Ordem -> ID-Natural
+        return (g_val, is_stem, order_idx, natural_parts)
+
+    # Ordenar pela ordem de extração primeiro, mantendo IDs como fallback
     paired = list(zip(questions, questions_overrides))
-    paired.sort(key=lambda x: _sort_key(x[0].id_item or str(x[0].numero_questao)))
+    paired.sort(key=lambda x: _sort_key(x[0]))
 
     # Deduplicar por id_item
     seen_ids: set[str] = set()
@@ -1341,7 +1415,9 @@ def _build_html(
 
     # Detectar matéria para MathJax condicional
     first_materia = (questions[0].materia if questions else "") or ""
-    is_pt = "portugu" in first_materia.lower() or "portugu" in str(approved_path).lower()
+    is_pt = ("portugu" in first_materia.lower() or 
+             "portugu" in str(approved_path).lower() or
+             "port639" in str(approved_path).lower())
     mathjax_scripts = "" if is_pt else _MATHJAX_SCRIPTS
 
     n_mc   = sum(1 for q in questions if q.tipo_item == "multiple_choice")

@@ -139,6 +139,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Identificador da prova (ex: 'EX-MatA635-F1-2023-CC-VD'). "
              "Inferido automaticamente se omitido.",
     )
+    cc_extract_parser.add_argument(
+        "--questoes-review", type=Path, default=None, dest="questoes_review_path",
+        help="Caminho para questoes_review.json do workspace principal. "
+             "Usado para cruzar tipo_item: multi_select/complete_table/essay nunca são "
+             "classificados como multiple_choice (evita contaminação OCR).",
+    )
 
     cc_validate_parser = subparsers.add_parser(
         "cc-validate",
@@ -290,7 +296,12 @@ def main() -> None:
 
     if args.command == "cc-extract":
         fonte = args.fonte or infer_fonte_from_path(args.markdown_path)
-        output = extract_cc(settings, args.markdown_path, fonte=fonte)
+        output = extract_cc(
+            settings,
+            args.markdown_path,
+            fonte=fonte,
+            questoes_review_path=args.questoes_review_path,
+        )
         print(output)
         return
 

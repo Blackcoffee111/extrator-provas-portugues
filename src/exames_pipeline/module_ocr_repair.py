@@ -33,8 +33,15 @@ _STAR_PARTIAL_NUM_RE = re.compile(r"^\s*\$\\(?:star|bigstar|ast)\b[^$]*\d[^$]*\$
 # Hífen de quebra de linha: palavra-\n"próxima" → "palavra-próxima" (só detecta)
 _LINEBREAK_HYPHEN_RE = re.compile(r"\w-\s*\n\s*\w")
 
-# Diacrítico de nota de rodapé colado ao texto: "cabelos2" → "cabelos²"
-_NOTE_NUM_FUSED_RE = re.compile(r"([a-záàâãéêíóôõúç])(\d)(?=\s)")
+# Nota de rodapé fundida: letra colada a dígito(s) não seguidos de letra/dígito.
+# A auto-correção ocorre em pdf_parser; aqui apenas se detecta para reporte.
+_NOTE_NUM_FUSED_RE = re.compile(
+    r"[a-záàâãéêíóôõúçA-ZÁÀÂÃÉÊÍÓÔÕÚÇ]\d+"
+    r"(?=[^a-záàâãéêíóôõúçA-ZÁÀÂÃÉÊÍÓÔÕÚÇ\d]|$)"
+)
+
+# Símbolo de ordinal — pode ser ordinal legítimo (1.º) ou nota de rodapé mal lida.
+_ORDINAL_SYMBOL_RE = re.compile(r"[ºª]")
 
 # Numeração de linha do excerto sem espaço: "5calamistrar" → detectar
 _LINE_NUM_FUSED_RE = re.compile(r"(?m)^(\d{1,3})([A-ZÁÀÂÃÉÊÍÓÔÕÚÇ][a-záàâãéêíóôõúç])")
@@ -98,6 +105,9 @@ def detect_ocr_issues_portugues(markdown_text: str) -> list[_OcrIssue]:
                                   stripped[:60]))
         if _NOTE_NUM_FUSED_RE.search(stripped):
             jobs.append(_OcrIssue(i, "note_number_fused",
+                                  stripped[:60]))
+        if _ORDINAL_SYMBOL_RE.search(stripped):
+            jobs.append(_OcrIssue(i, "ordinal_symbol",
                                   stripped[:60]))
         if _LINE_NUM_FUSED_RE.match(stripped):
             jobs.append(_OcrIssue(i, "line_number_fused",

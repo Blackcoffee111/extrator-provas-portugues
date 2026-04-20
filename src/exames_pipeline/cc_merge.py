@@ -152,6 +152,11 @@ def merge_cc(criterios_path: Path, questoes_path: Path, force: bool = False) -> 
         # Só copiar resposta_correta se o critério for MC; caso contrário preservar
         if criterio.tipo == "multiple_choice":
             q.resposta_correta = criterio.resposta_correta or q.resposta_correta
+        elif criterio.tipo in {"multi_select", "complete_table"}:
+            # Lista de respostas (ex: ["I","III","IV"]) — preservar se o critério vier vazio
+            q.respostas_corretas = criterio.respostas_corretas or q.respostas_corretas
+            # Limpar resposta_correta para evitar lixo MC herdado de extrações anteriores
+            q.resposta_correta = None
         q.solucao               = criterio.solucao
         q.criterios_parciais    = criterio.criterios_parciais
         q.resolucoes_alternativas = criterio.resolucoes_alternativas

@@ -116,7 +116,24 @@ def _validate_criterio(c: CriterioRaw) -> tuple[list[str], list[str]]:
                 f"(esperado A, B, C ou D)"
             )
 
-    elif c.tipo in {"open_response", "essay", "complete_table", "multi_select"}:
+    if c.tipo in {"multi_select", "complete_table"}:
+        # Detetar contaminação OCR: nunca deve sobrar uma "Opção (X)" ou letra MC isolada
+        if c.resposta_correta:
+            erros.append(
+                f"tipo '{c.tipo}' não admite resposta_correta MC ('{c.resposta_correta}'); "
+                f"usar respostas_corretas (lista) — provável contaminação OCR de 'Opção (X)'."
+            )
+        if not c.respostas_corretas:
+            erros.append(
+                f"respostas_corretas vazio para tipo '{c.tipo}': preencher com lista "
+                f"(ex: ['I','III','IV']) extraída do PDF CC-VD."
+            )
+        elif c.tipo == "multi_select" and len(c.respostas_corretas) < 2:
+            erros.append(
+                f"multi_select requer ≥2 respostas; recebido: {c.respostas_corretas}"
+            )
+
+    if c.tipo in {"open_response", "essay", "complete_table", "multi_select"}:
         # Aceitar critérios com níveis de desempenho (PT) — têm campo "nivel" em vez de "pontos" raiz
         has_niveis = any("nivel" in step for step in (c.criterios_parciais or []))
         if not c.solucao or not c.solucao.strip():
@@ -127,6 +144,10 @@ def _validate_criterio(c: CriterioRaw) -> tuple[list[str], list[str]]:
             # essay sem etapas ainda é válido se for aviso (agente revê)
             if c.tipo == "essay":
                 avisos.append("criterios_parciais vazio — níveis de desempenho A/B/C não extraídos; preencher manualmente")
+            elif c.tipo in {"complete_table", "multi_select"}:
+                # Para estas questões de escolha em PT, a solucao (ex: "Opção (A)") é suficiente
+                if not c.solucao or not c.solucao.strip():
+                    erros.append("solucao e criterios_parciais vazios")
             else:
                 erros.append("criterios_parciais vazio — nenhuma etapa ou nível extraído")
 
