@@ -58,7 +58,36 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+## 5. Integridade do Documento Original
 
+**O texto da prova é sagrado. Nunca inventes, parafraseies ou "melhores" conteúdo original.**
+
+A revisão do `prova.md` e do `questoes_review.json` é **transcrição com correção de artefatos OCR** — não é uma tarefa de redação, tradução ou interpretação. O agente não é o autor do texto.
+
+### O que é permitido
+
+| Tipo de edição | Condição obrigatória |
+|---------------|----------------------|
+| Corrigir tipografia PT (`«»`, `…`, diacríticos) | O erro é inequívoco (ex: `"` → `«»`) |
+| Converter número fundido → sobrescrito (`palavra2` → `palavra²`) | Automático via pipeline; nunca deduzir o número |
+| Corrigir ordinal OCR → sobrescrito (`cútisº` → `cútis⁸`) | O número correto está **explicitamente listado nas NOTAS** do próprio documento |
+| Corrigir hífens de quebra de linha | O erro é inequívoco |
+
+### O que é proibido — hard stops
+
+- **Nunca alterar definições nas NOTAS** (secção "NOTAS" do excerto). As definições são transcritas do PDF; o agente não tem autoridade para as corrigir, clarificar ou expandir.
+- **Nunca deduzir um número de nota por raciocínio** (ex: "a nota 9 cobre Antony e Fausto, logo Fausto deve ser ⁹"). Se os números não batem certo, assinalar e parar.
+- **Nunca preencher lacunas** no texto original — se o OCR perdeu uma palavra ou frase, marcar com `[ILEGÍVEL]` e reportar ao utilizador. Não inventar o que podia estar lá.
+- **Nunca reescrever frases** do enunciado ou das NOTAS para as tornar mais claras ou gramaticalmente corretas. Mesmo que pareça errado, pode ser a formulação exata do exame.
+- **Nunca usar o conhecimento geral** sobre a obra, o autor ou o tema para "completar" ou "corrigir" o texto. O PDF é o árbitro — o agente não leu o PDF.
+
+### Regra de ouro
+
+> Se não consegues apontar no próprio documento a evidência que justifica a alteração, não faças a alteração.
+
+Quando em dúvida: reportar ao utilizador com a linha exata e o motivo da dúvida.
+
+---
 
 ## Contexto do projeto
 
@@ -94,7 +123,7 @@ Pipeline Python para extrair, validar, categorizar e publicar questões de prova
 
 ---
 
-## Superfície MCP — 6 tools
+## Superfície MCP — 7 tools
 
 O agente usa apenas estes 6 comandos. Tudo o resto (micro-lint, cotações, cc_extract, cc_validate, cc_merge, backup) corre internamente.
 
@@ -106,6 +135,7 @@ O agente usa apenas estes 6 comandos. Tudo o resto (micro-lint, cotações, cc_e
 | `run_review(workspace)` | Abre preview para revisão humana |
 | `run_fix_question(workspace, id_item, field, value)` | Correção pontual pós-revisão |
 | `get_question_context(workspace, id_item, pad=3)` | Extrato do prova.md para um item (verificar OCR sem ler o ficheiro inteiro) |
+| `get_context_stem_pdf_pages(workspace, id_item)` | PDF + páginas prováveis de um `context_stem` — para verificação obrigatória dos números de linha |
 
 ### Stages de `run_stage`
 
@@ -196,20 +226,37 @@ Workspaces antigos (sem `state.json`) têm o estado inferido a partir dos fichei
 Cada item gerado pelo `run_stage(stage='extract')` tem `"reviewed": false`. O agente deve:
 1. Ler `questoes_review.json` com `Read` (ficheiro compacto — sem `texto_original`, `source_span` e campos estruturais)
 2. Para cada item: verificar enunciado, tipografia PT, imagens; corrigir com `Edit`
-3. Preencher `tema`, `subtema`, `descricao_breve`, `tags` inline (exceto `context_stem`)
+3. Preencher `tema`, `subtema`, `descricao_breve`, `tags` inline — **inclusive para `context_stem`**
 4. Para `essay`: preencher `palavras_min` e `palavras_max` se visível no enunciado
 5. Setar `"reviewed": true` no item após revisar
 6. Para verificar o OCR bruto de um item: `get_question_context(workspace, id_item)` — devolve o extrato do `prova.md` sem ler o ficheiro inteiro
 
-**Itens `context_stem` em provas de Português** (id_item do tipo `"I-ctx"`, `"II-ctx"`, `"III-ctx"`):
+**Categorização granular (obrigatória):** não escrever `tema` / `subtema` genéricos como `"Narrativa"` / `"Coração, Cabeça e Estômago"`. Usar a forma `"<Domínio> — <Género/Subdomínio>"` no tema e `"<Autor>, «<Obra>» — <recorte específico>"` no subtema. Ver o catálogo completo no skill `/exames`, secção 4.1.
+
+**Itens `context_stem` em provas de Português** (id_item do tipo `"I-ctx1"`, `"I-ctx2"`, `"II-ctx1"`, `"III-ctx1"`):
 - Representam o excerto literário (GRUPO I), texto expositivo (GRUPO II) e tema de dissertação (GRUPO III)
 - Revisão obrigatória: tipografia PT («», …, diacríticos), numeração de linhas do excerto, notas de rodapé
-- **Não** precisam de `tema`/`subtema`/`tags` — o validador ignora categorização para `context_stem`
-- Setar `"reviewed": true` depois de verificar o texto — idêntico às questões regulares
+- **Categorização obrigatória**: `tema`, `subtema`, `descricao_breve`, `tags` seguem o mesmo critério granular das questões (ver skill `/exames`, secção 4.2).
+- **Verificação obrigatória de números de linha** — gate duro no `validate`:
+  1. Para cada `context_stem`, chamar `get_context_stem_pdf_pages(workspace, id_item)` — devolve o PDF, o intervalo de páginas provável e o excerto actual de `prova.md`.
+  2. Abrir o PDF nessas páginas com `Read(file_path=<pdf>, pages=...)` e contar visualmente os marcadores de linha na margem do excerto.
+  3. Editar o `enunciado` em `questoes_review.json` aplicando o **formato canónico**: cada marcador fica sozinho em início de linha, no padrão `\n{N} {conteúdo da linha N}`. Nunca deixar um número fundido à palavra seguinte, nem inline no meio de uma frase, nem com OCR corrompido (`|0`, `I0`, `l0`, `IO`) — reescrever para o dígito canónico.
+  4. Preencher `tem_numeracao_linhas`: `true` se o excerto original no PDF tem marcadores de linha; `false` se não tem (ex.: tema de dissertação do Grupo III, tipicamente sem numeração).
+  5. Se `tem_numeracao_linhas: false`, garantir que nenhum dígito espúrio do OCR ficou colado a palavras — limpar antes de prosseguir.
+  6. Marcar `linhas_verificadas: true` apenas depois de (2)+(3)+(4) estarem completas.
+- `run_stage(stage='validate')` **bloqueia** se qualquer `context_stem` tem `tem_numeracao_linhas: null`, `linhas_verificadas: false`, marcadores ausentes quando `tem_numeracao_linhas: true`, ou resíduos numéricos quando `tem_numeracao_linhas: false`.
+- Setar `"reviewed": true` depois de verificar o texto, preencher a categorização e completar o fluxo acima — idêntico às questões regulares
 
 `run_stage(stage='validate')` faz o merge de `questoes_review.json` + `questoes_meta.json` antes do lint.  
 `run_stage(stage='validate')` bloqueia se existirem itens com `"reviewed": false`.  
 O mesmo contrato aplica-se a `criterios_raw.json` no fluxo CC-VD (sem categorização).
+
+**Relação pai ↔ filha (`id_contexto_pai`) — obrigatório em provas PT:**
+- Em provas de Português, cada Parte (A/B/C) ou Grupo com texto-âncora tem um único `context_stem` pai das questões daquela parte. Ex.: em 2024, **um texto serve toda a Parte A, outro toda a Parte B**, e assim por diante.
+- O extractor preenche `id_contexto_pai` automaticamente quando deteta o preâmbulo da parte. Mesmo assim, o `validate` corre um gate anti-órfãs:
+  - **ERRO (bloqueia)**: questão com `id_contexto_pai` vazio **e** existe um `context_stem` na mesma `(grupo, parte)`. O agente tem de abrir `questoes_review.json`, ler o enunciado para confirmar que a questão se refere àquele texto, e preencher `id_contexto_pai` com o id do stem indicado no erro.
+  - **AVISO**: questão órfã cujo grupo tem stems em partes diferentes (ex.: `I-C-7` que pede para comparar os textos das Partes A e B). Ler o enunciado e, se houver referência explícita a um desses textos, preencher `id_contexto_pai`; caso contrário, deixar vazio.
+- Quando o erro aparecer, a mensagem diz exactamente que stem usar — basta copiar o id para o campo `id_contexto_pai` do item em `questoes_review.json`.
 
 ---
 

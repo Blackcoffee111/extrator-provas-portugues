@@ -6,9 +6,10 @@ import re
 from .schemas import EstruturaCotacoes, Question, dump_json, dump_questions, load_cotacoes, load_json, load_questions
 
 
-# Suporta: "1", "2.1", "I-1", "II-2.1", "I-A-1", "I-B-6" (Português com partes)
+# Suporta: "1", "2.1", "I-1", "II-2.1", "I-ctx1", "I-ctx2", "II-ctx1"
+# ctx\d* cobre tanto o legado "I-A-ctx" (ctx sem número) como o novo "I-ctx1"
 ITEM_ID_PATTERN = re.compile(
-    r"^(?:(?P<grupo>[IVX]+)-)?(?:(?P<parte>[A-C])-)?(?P<main>\d{1,3})(?:\.(?P<sub>\d{1,2}))?$"
+    r"^(?:(?P<grupo>[IVX]+)-)?(?:(?P<parte>[A-C])-)?(?P<main>\d{1,3}|ctx\d*)(?:\.(?P<sub>\d{1,2}))?$"
 )
 MISSING_CREDENTIALS_NOTE_PATTERN = re.compile(r"^Fornecedor '.+' sem credenciais;")
 MIN_TEXT_LENGTH = 30
@@ -480,11 +481,56 @@ def _validate_choice_precision(question: Question) -> tuple[list[str], list[str]
     return errors, warnings
 
 
+_LINE_MARKER_CANONICAL_RE = re.compile(r"(?m)^(\d{1,3}) \S")
+_LINE_MARKER_RESIDUAL_RE = re.compile(
+    r"[^\n](?:\s)(\d{1,3})(?:\s)[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ«]"
+    r"|[A-Za-zÁ-ÿ](\d{1,3})[A-Za-zÁ-ÿ]"
+)
+
+
+def _validate_context_stem_line_numbers(question: Question) -> list[str]:
+    """Gate obrigatório: todo context_stem tem de declarar se há numeração de linhas.
+
+    - tem_numeracao_linhas=None → bloqueia (agente não verificou ainda).
+    - linhas_verificadas=False → bloqueia (agente não conferiu o PDF).
+    - tem_numeracao_linhas=True mas enunciado sem marcadores no formato canónico
+      "\\n{N} …" → bloqueia.
+    - tem_numeracao_linhas=False mas enunciado com resíduos que parecem marcadores
+      fundidos (ex: "palavra5 outra", "texto. 10 Outra") → bloqueia.
+    """
+    errors: list[str] = []
+    tem_num = question.tem_numeracao_linhas
+    if tem_num is None:
+        errors.append(
+            "context_stem sem tem_numeracao_linhas definido: o agente deve conferir o PDF "
+            "original e preencher true (texto tem marcadores de linha) ou false (não tem)."
+        )
+    if not question.linhas_verificadas:
+        errors.append(
+            "context_stem com linhas_verificadas=false: o agente deve conferir o PDF "
+            "original, aplicar o formato canónico '\\n{N} …' a cada marcador presente, "
+            "e só então marcar linhas_verificadas=true."
+        )
+    if tem_num is True:
+        enunciado = question.enunciado or ""
+        if not _LINE_MARKER_CANONICAL_RE.search(enunciado):
+            errors.append(
+                "context_stem declara tem_numeracao_linhas=true mas o enunciado não contém "
+                "nenhum marcador no formato canónico '\\n{N} …' em início de linha."
+            )
+    if tem_num is False:
+        enunciado = question.enunciado or ""
+        if _LINE_MARKER_RESIDUAL_RE.search(enunciado):
+            errors.append(
+                "context_stem declara tem_numeracao_linhas=false mas o enunciado contém "
+                "números que parecem resíduos de marcadores de linha fundidos ao texto."
+            )
+    return errors
+
+
 def _validate_categorization_fields(question: Question) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
-    if question.tipo_item == "context_stem":
-        return errors, warnings
 
     if not (question.tema or "").strip() or (question.tema or "").strip().lower() == "por categorizar":
         warnings.append("Tema ausente ou por categorizar.")
@@ -800,9 +846,102 @@ def _validate_portugues_tipos(question: Question) -> tuple[list[str], list[str]]
     return errors, warnings
 
 
+def _validate_pt_stem_integrity(questions: list[Question]) -> tuple[dict[str, list[str]], list[str]]:
+    """Verifica integridade da relação context_stem ↔ questões filhas.
+
+    Erros:
+    - id_contexto_pai não-vazio aponta para stem inexistente no mesmo grupo.
+    Avisos:
+    - context_stem sem nenhuma questão filha.
+    """
+    errors_by_id: dict[str, list[str]] = {}
+    warnings: list[str] = []
+    stem_ids = {q.id_item for q in questions if q.tipo_item == "context_stem" and q.id_item}
+    stem_children: dict[str, int] = {sid: 0 for sid in stem_ids}
+    for q in questions:
+        if q.tipo_item == "context_stem":
+            continue
+        pai = q.id_contexto_pai or ""
+        if not pai:
+            continue
+        if pai not in stem_ids:
+            errors_by_id.setdefault(q.id_item, []).append(
+                f"id_contexto_pai '{pai}' não corresponde a nenhum context_stem existente."
+            )
+        else:
+            stem_children[pai] = stem_children.get(pai, 0) + 1
+    for sid, count in stem_children.items():
+        if count == 0:
+            warnings.append(f"context_stem '{sid}' não tem nenhuma questão filha associada.")
+    return errors_by_id, warnings
+
+
+def _validate_pt_orphan_children(
+    questions: list[Question],
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Detecta questões órfãs (id_contexto_pai vazio) quando deveriam ter pai.
+
+    Em provas PT, cada parte (A/B/C) ou grupo tem tipicamente um texto âncora
+    (context_stem) que serve de pai para todas as questões daquela parte. Quando
+    uma questão fica órfã mas existe um stem na mesma (grupo, parte), isto
+    indica falha na atribuição automática — o agente deve ler o enunciado e
+    preencher `id_contexto_pai` manualmente em questoes_review.json.
+
+    Regras:
+    - ERRO: existe context_stem na mesma (grupo, parte) → pai óbvio, deve ser preenchido.
+    - AVISO: existem stems no mesmo grupo mas em partes diferentes → agente
+      deve verificar se a questão refere o texto de alguma outra parte.
+    - Silêncio: nenhum stem no grupo → órfã legítima.
+    """
+    errors_by_id: dict[str, list[str]] = {}
+    warnings_by_id: dict[str, list[str]] = {}
+
+    # Mapas: (grupo, parte) → id_item do stem; grupo → lista de (parte, id_item)
+    stem_by_group_part: dict[tuple[str, str], str] = {}
+    stems_by_group: dict[str, list[tuple[str, str]]] = {}
+    for q in questions:
+        if q.tipo_item != "context_stem" or not q.id_item:
+            continue
+        key = (q.grupo or "", q.parte or "")
+        stem_by_group_part.setdefault(key, q.id_item)
+        stems_by_group.setdefault(q.grupo or "", []).append((q.parte or "", q.id_item))
+
+    for q in questions:
+        if q.tipo_item == "context_stem":
+            continue
+        if q.id_contexto_pai:
+            continue
+        grupo = q.grupo or ""
+        parte = q.parte or ""
+        same_part_stem = stem_by_group_part.get((grupo, parte))
+        same_group_stems = stems_by_group.get(grupo, [])
+        if same_part_stem:
+            errors_by_id.setdefault(q.id_item, []).append(
+                f"Questão órfã: id_contexto_pai vazio mas existe context_stem "
+                f"'{same_part_stem}' na mesma parte (grupo={grupo or '-'}, "
+                f"parte={parte or '-'}). Ler o enunciado e preencher "
+                f"id_contexto_pai='{same_part_stem}' em questoes_review.json."
+            )
+        elif same_group_stems:
+            candidatos = ", ".join(
+                f"'{sid}' (parte {p or '-'})" for p, sid in same_group_stems
+            )
+            warnings_by_id.setdefault(q.id_item, []).append(
+                f"Questão órfã: id_contexto_pai vazio; não há stem na mesma parte "
+                f"mas o grupo {grupo} tem outros textos ({candidatos}). Verificar "
+                f"no enunciado se a questão refere algum desses textos e, se sim, "
+                f"preencher id_contexto_pai em questoes_review.json."
+            )
+    return errors_by_id, warnings_by_id
+
+
 def _validate_numbering_sequence(questions: list[Question]) -> dict[str, list[str]]:
     errors_by_id: dict[str, list[str]] = {}
-    top_level_ids = [question for question in questions if question.subitem is None]
+    # Excluir context_stems: têm numero_principal=0 e não são questões numeradas
+    top_level_ids = [
+        question for question in questions
+        if question.subitem is None and question.tipo_item != "context_stem"
+    ]
     top_levels = [q.numero_principal or q.numero_questao for q in top_level_ids]
     if top_levels:
         expected = list(range(min(top_levels), max(top_levels) + 1))
@@ -840,6 +979,12 @@ def validate_questions(raw_json_path: Path, materia: str = "") -> tuple[Path, Pa
     trace_map = _load_trace_map(raw_json_path)
     sequence_errors = _validate_numbering_sequence(questions)
     missing_subitem_errors = _validate_missing_subitems(questions)
+    stem_integrity_errors, stem_integrity_warnings = (
+        _validate_pt_stem_integrity(questions) if is_pt else ({}, [])
+    )
+    orphan_errors, orphan_warnings = (
+        _validate_pt_orphan_children(questions) if is_pt else ({}, {})
+    )
 
     # Carregar tabela de cotações se disponível (gerada pelo módulo_cotacoes)
     cotacoes_path = output_dir / "cotacoes_estrutura.json"
@@ -893,22 +1038,29 @@ def validate_questions(raw_json_path: Path, materia: str = "") -> tuple[Path, Pa
             ctx_errors = cotacoes_errors_by_id.get(question.id_item, [])
             ctx_errors = list(ctx_errors)
             ctx_errors.extend(_validate_figura_reference(question))
-            for err in ctx_errors:
-                note = f"[validate][erro] {err}"
-                if note not in question.observacoes:
-                    question.observacoes.append(note)
+            ctx_warnings: list[str] = []
+            cat_errors, cat_warnings = _validate_categorization_fields(question)
+            ctx_errors.extend(cat_errors)
+            ctx_warnings.extend(cat_warnings)
+            if is_pt:
+                ctx_errors.extend(_validate_context_stem_line_numbers(question))
+            # Avisos de integridade stem↔filha (stem órfão)
+            for warn in stem_integrity_warnings:
+                if question.id_item in warn:
+                    ctx_warnings.append(warn)
+            _append_validation_notes(question, ctx_errors, ctx_warnings)
             if ctx_errors:
                 question.status = "validation_error"
                 rejected.append(question)
             else:
-                question.status = "approved"
+                question.status = "approved_with_warnings" if ctx_warnings else "approved"
                 approved.append(question)
             report_items.append({
                 "id_item": question.id_item,
                 "ordem_item": question.ordem_item,
                 "status": question.status,
                 "errors": ctx_errors,
-                "warnings": [],
+                "warnings": ctx_warnings,
             })
             previous_order = current_order
             if question.source_span and isinstance(question.source_span.get("line_end"), int):
@@ -957,6 +1109,17 @@ def validate_questions(raw_json_path: Path, materia: str = "") -> tuple[Path, Pa
         warnings.extend(_validate_source_span_coverage(question))
         for missing_err in missing_subitem_errors.get(question.id_item, []):
             errors.append(missing_err)
+        # Erros de integridade stem↔filha (id_contexto_pai inválido)
+        for stem_err in stem_integrity_errors.get(question.id_item, []):
+            if stem_err not in errors:
+                errors.append(stem_err)
+        # Erros/avisos de órfãs PT (id_contexto_pai vazio mas stem disponível)
+        for orphan_err in orphan_errors.get(question.id_item, []):
+            if orphan_err not in errors:
+                errors.append(orphan_err)
+        for orphan_warn in orphan_warnings.get(question.id_item, []):
+            if orphan_warn not in warnings:
+                warnings.append(orphan_warn)
         # Erros estruturais das cotações — sempre obrigatórios (não são avisos)
         for cotacoes_err in cotacoes_errors_by_id.get(question.id_item, []):
             if cotacoes_err not in errors:
