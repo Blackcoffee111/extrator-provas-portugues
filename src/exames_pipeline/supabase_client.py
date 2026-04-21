@@ -108,29 +108,49 @@ def _slugify(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
 
 
+# ── Whitelist canônica — qualquer extensão exige actualizar aqui ─────────────
+# Alterações a esta whitelist devem vir em PR separado, com revisão.
+MATERIAS_CANONICAS: frozenset[str] = frozenset({"Matemática A", "Português"})
+FASES_CANONICAS:    frozenset[str] = frozenset({"1.ª Fase", "2.ª Fase", "Época Especial"})
+TIPOS_CANONICOS:    frozenset[str] = frozenset({"Exame Nacional"})
+
+# Regex estrita: "<Tipo>, <Matéria>, <Fase>, <Ano>"
+# Exemplo válido: "Exame Nacional, Português, 1.ª Fase, 2024"
+_FONTE_RE = re.compile(
+    r"^(?P<tipo>"    + "|".join(re.escape(t) for t in sorted(TIPOS_CANONICOS, key=len, reverse=True))    + r"), "
+    r"(?P<materia>"  + "|".join(re.escape(m) for m in sorted(MATERIAS_CANONICAS, key=len, reverse=True)) + r"), "
+    r"(?P<fase>"     + "|".join(re.escape(f) for f in sorted(FASES_CANONICAS, key=len, reverse=True))    + r"), "
+    r"(?P<ano>20\d{2})$"
+)
+
+
+class FonteInvalidaError(ValueError):
+    """Erro levantado quando uma string de fonte não respeita o formato canônico."""
+
+
 def _parse_fonte(fonte: str) -> dict[str, Any]:
-    """Extrai metadata de uma string de fonte legível.
+    """Extrai metadata de uma string de fonte canônica.
 
-    Exemplo: "Exame Nacional, Matemática A, 1.ª Fase, 2024"
-    → {tipo: "Exame Nacional", materia: "Matemática A", fase: "1.ª Fase", ano: 2024}
+    Formato aceito (estrito): "<Tipo>, <Matéria>, <Fase>, <Ano>"
+    Exemplo: "Exame Nacional, Português, 1.ª Fase, 2024"
+
+    Levanta FonteInvalidaError se a string não for canônica.
     """
-    parts   = [p.strip() for p in fonte.split(",")]
-    ano_m   = re.search(r"\b(19|20)\d{2}\b", fonte)
-    fase_m  = re.search(r"\d+\.ª\s*(?:Fase|fase)", fonte)
-    tipo    = parts[0] if parts else "Outro"
-
-    # Matéria: parte que não tem dígitos de ano nem padrão de fase
-    materia = ""
-    for part in parts[1:]:
-        if not re.search(r"\b\d{4}\b|\d+\.ª", part):
-            materia = part.strip()
-            break
-
+    m = _FONTE_RE.match(fonte.strip() if isinstance(fonte, str) else "")
+    if not m:
+        raise FonteInvalidaError(
+            f"Fonte fora do formato canônico: {fonte!r}. "
+            f"Esperado: '<Tipo>, <Matéria>, <Fase>, <Ano>' com "
+            f"Tipo ∈ {sorted(TIPOS_CANONICOS)}, "
+            f"Matéria ∈ {sorted(MATERIAS_CANONICAS)}, "
+            f"Fase ∈ {sorted(FASES_CANONICAS)}, "
+            f"Ano ∈ 20XX."
+        )
     return {
-        "tipo":    tipo,
-        "materia": materia,
-        "ano":     int(ano_m.group()) if ano_m else None,
-        "fase":    fase_m.group()     if fase_m else None,
+        "tipo":    m.group("tipo"),
+        "materia": m.group("materia"),
+        "ano":     int(m.group("ano")),
+        "fase":    m.group("fase"),
     }
 
 
@@ -139,9 +159,16 @@ def _parse_fonte(fonte: str) -> dict[str, Any]:
 def _get_or_create_materia(
     settings: Settings, headers: dict[str, str], nome: str
 ) -> str:
-    """Retorna o id de uma matéria, criando-a se não existir."""
-    if not nome:
-        nome = "Desconhecido"
+    """Retorna o id de uma matéria, criando-a se não existir.
+
+    Só aceita nomes na whitelist MATERIAS_CANONICAS — extensões a essa
+    lista devem vir em alteração explícita do código.
+    """
+    if nome not in MATERIAS_CANONICAS:
+        raise FonteInvalidaError(
+            f"Matéria não-canônica: {nome!r}. "
+            f"Canônicas: {sorted(MATERIAS_CANONICAS)}."
+        )
     codigo = _slugify(nome)
     url = (f"{settings.supabase_url}/rest/v1/materias"
            f"?codigo=eq.{codigo}&select=id")
@@ -476,6 +503,31 @@ def upload_to_supabase(
         summary.errors.append(msg)
         return summary
 
+    # Guard canônico: fonte tem de bater com o formato e matéria desnormalizada
+    # tem de coincidir com a parseada — impede reincidência dos nomes mistos
+    # ("Matematica A", "Prova 635", "Desconhecido", etc.) que já estragaram o schema antes.
+    fonte_str = questions[0].fonte or ""
+    try:
+        parsed = _parse_fonte(fonte_str)
+    except FonteInvalidaError as exc:
+        msg = f"Upload bloqueado: {exc}"
+        print(f"[upload] ❌ {msg}")
+        summary.errors.append(msg)
+        return summary
+
+    divergentes = sorted({
+        q.materia for q in questions
+        if q.materia and q.materia != parsed["materia"]
+    })
+    if divergentes:
+        msg = (
+            f"Upload bloqueado: questões com materia desnormalizada {divergentes} "
+            f"diferente da fonte ({parsed['materia']!r}). Corrija questoes_final.json."
+        )
+        print(f"[upload] ❌ {msg}")
+        summary.errors.append(msg)
+        return summary
+
     if not settings.supabase_url or not settings.supabase_key:
         summary.errors.append("SUPABASE_URL / SUPABASE_KEY não configurados.")
         summary.dry_run = True
@@ -504,11 +556,8 @@ def upload_to_supabase(
         print(f"[upload] ❌ {exc}")
 
     # ── 2. Resolver matéria e fonte ───────────────────────────────────────────
-    # Todas as questões de um ficheiro partilham a mesma fonte
-    fonte_str  = questions[0].fonte if questions else ""
-    materia_str = questions[0].materia if questions else ""
-    if not materia_str:
-        materia_str = _parse_fonte(fonte_str).get("materia") or "Desconhecido"
+    # Todas as questões de um ficheiro partilham a mesma fonte (já validada acima)
+    materia_str = parsed["materia"]
 
     if dry_run:
         fonte_id   = "dry-run-fonte-id"
