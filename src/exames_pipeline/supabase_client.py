@@ -593,12 +593,15 @@ def upload_to_supabase(
         if q.tipo_item == "context_stem":
             continue  # já tratado em contextos
 
-        # Descobrir contexto_id: o pai é o prefixo antes do primeiro ponto.
-        # Priorizar id_item (lida com "II-1.1" → "II-1" e "1.1" → "1");
-        # fallback para numero_principal em formatos antigos sem grupo;
-        # fallback PT: contexto de grupo ("<grupo>-ctx") para provas de Português.
+        # Descobrir contexto_id. Ordem de preferência:
+        # 1. id_contexto_pai explícito (Português — preenchido pelo extractor/agente)
+        # 2. Prefixo antes do primeiro ponto em id_item (Matemática — "II-1.1" → "II-1")
+        # 3. numero_principal (formatos antigos sem grupo)
+        # 4. Fallback PT: "<grupo>-ctx"
         contexto_id: str | None = None
-        if "." in q.id_item:
+        if q.id_contexto_pai:
+            contexto_id = contexto_map.get(q.id_contexto_pai)
+        if contexto_id is None and "." in q.id_item:
             pai = q.id_item.split(".")[0]
             contexto_id = contexto_map.get(pai)
         if contexto_id is None and q.numero_principal is not None:
