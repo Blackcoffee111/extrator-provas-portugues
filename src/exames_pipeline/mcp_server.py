@@ -498,18 +498,27 @@ def run_stage(
     pdf_cc_path: str | None = None,
     force: bool = False,
 ) -> str:
-    """Executa um estágio do pipeline: extract | validate | cc (×2) | merge | upload.
+    """Executa um estágio do pipeline: extract | validate | cc (×2) | merge | upload | reextract-images.
 
     Args:
         workspace:    Nome do workspace (ex: "EX-MatA635-F1-2024_net")
-        stage:        extract | validate | cc | merge | upload
-        pdf_path:     PDF absoluto da prova (extract, se prova.md não existir)
+        stage:        extract | validate | cc | merge | upload | reextract-images
+        pdf_path:     PDF absoluto da prova (extract, se prova.md não existir;
+                      reextract-images: PDF original, sem pré-processamento)
         workspace_cc: Workspace CC-VD (cc/merge; auto-detectado se omitido)
         pdf_cc_path:  PDF absoluto do CC-VD (cc, 1ª chamada, se prova.md não existir)
         force:        Ignora protecção de estado (DESTRUTIVO)
+
+    Notas sobre reextract-images:
+      Substitui as imagens em `imagens_extraidas/` por recortes do PDF original,
+      eliminando o brilho/contraste artificiais do pré-processamento de OCR.
+      Idempotente — backup automático em `imagens_extraidas.pre_reextract/` na
+      primeira execução. Não altera `prova.md` nem JSONs (nomes são preservados).
+      Pode correr a qualquer momento após `extract`, mesmo em workspaces já
+      validados ou com upload feito (re-upload sobrescreve os blobs).
     """
     stage = stage.strip().lower()
-    valid_stages = {"extract", "validate", "cc", "merge", "upload"}
+    valid_stages = {"extract", "validate", "cc", "merge", "upload", "reextract-images"}
     if stage not in valid_stages:
         return (
             f"❌ Stage '{stage}' inválido.\n"
@@ -914,6 +923,22 @@ def run_stage(
                     f"   Depois: run_stage(workspace='{workspace}', stage='upload')"
                 )
         return output
+
+    # ── reextract-images ──────────────────────────────────────────────────────
+    if stage == "reextract-images":
+        if not pdf_path:
+            return (
+                "❌ reextract-images requer pdf_path (PDF original da prova, sem pré-processamento).\n"
+                f"Ex: run_stage(workspace='{workspace}', stage='reextract-images', "
+                "pdf_path='/abs/caminho/EX-Port639-F2-2023-V1.pdf')"
+            )
+        pdf_p = Path(pdf_path)
+        if not pdf_p.exists():
+            return f"❌ PDF não encontrado: {pdf_p}"
+
+        args_cli = ["reextract-images", workspace, str(pdf_p)]
+        result = _run(args_cli)
+        return _format_result("reextract-images", result)
 
     # ── upload ────────────────────────────────────────────────────────────────
     if stage == "upload":

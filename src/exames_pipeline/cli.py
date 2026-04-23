@@ -164,6 +164,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Incluir apenas os itens fundidos e ignorar pendentes (sem critério/mismatch/contaminação).",
     )
 
+    reextract_parser = subparsers.add_parser(
+        "reextract-images",
+        help="Recorta imagens do PDF original (sem pré-processamento) usando bboxes do MinerU.",
+    )
+    reextract_parser.add_argument("workspace", type=str, help="Nome do workspace.")
+    reextract_parser.add_argument("pdf_path", type=Path, help="PDF original da prova (sem pré-processamento).")
+    reextract_parser.add_argument("--dpi", type=int, default=220)
+    reextract_parser.add_argument("--padding", type=float, default=4.0, dest="padding_pt")
+    reextract_parser.add_argument("--no-backup", action="store_true",
+                                  help="Não criar backup em imagens_extraidas.pre_reextract/.")
+
     return parser
 
 
@@ -219,6 +230,24 @@ def main() -> None:
             print(f"[pipeline] Estruturando questões com fonte inferida: {fonte}")
         raw_json_path = structure_markdown(settings, result.markdown_path, fonte=fonte)
         print(f"[pipeline] ✅ Questões estruturadas → {raw_json_path}")
+
+        # Re-extrai imagens do PDF original para evitar herdar brilho/contraste
+        # artificiais do pré-processamento de OCR. Nomes SHA-256 preservados.
+        if not args.no_preprocess:
+            workspace_dir = result.markdown_path.parent
+            if (workspace_dir / "imagens_extraidas").exists():
+                try:
+                    from .module_reextract_images import reextract_images  # noqa: PLC0415
+                    print("\n[pipeline] Re-extraindo imagens do PDF original (sem pré-processamento)...")
+                    reex = reextract_images(
+                        workspace_dir,
+                        args.pdf_path.resolve(),
+                        verbose=False,
+                    )
+                    print(f"[pipeline] {reex.message}")
+                except Exception as exc:
+                    print(f"[pipeline] ⚠️  Re-extração de imagens falhou: {exc} "
+                          "(imagens pré-processadas mantidas; correr manualmente com `reextract-images`).")
         return
 
     if args.command == "structure":
@@ -314,6 +343,21 @@ def main() -> None:
     if args.command == "cc-merge":
         output = merge_cc(args.criterios_aprovados_path, args.questoes_aprovadas_path, force=args.force)
         print(output)
+        return
+
+    if args.command == "reextract-images":
+        from .module_reextract_images import reextract_images  # noqa: PLC0415
+        workspace_dir = settings.workdir / args.workspace
+        if not workspace_dir.exists():
+            raise SystemExit(f"❌ Workspace não encontrado: {workspace_dir}")
+        result = reextract_images(
+            workspace_dir,
+            args.pdf_path.resolve(),
+            dpi=args.dpi,
+            padding_pt=args.padding_pt,
+            make_backup=not args.no_backup,
+        )
+        print(result.message)
         return
 
 
