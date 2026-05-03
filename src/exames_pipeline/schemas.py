@@ -137,6 +137,12 @@ class EstruturaCotacoes:
     cotacoes: dict[str, int]          # "1.1" -> 10, "2" -> 20
     confianca: str = "alta"           # "alta" | "media" | "baixa"
     raw_response: str = ""
+    # Escape hatch: quando o parser de cotações falha mas o utilizador prefere
+    # não corrigir manualmente toda a tabela, define-se "bypass_validation": true
+    # neste ficheiro para que o validate IGNORE a consistência cotações↔JSON.
+    # NÃO desliga as outras validações por item — só desactiva o cross-check
+    # estrutural. Imprime aviso destacado para que a decisão fique visível.
+    bypass_validation: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -149,6 +155,7 @@ class EstruturaCotacoes:
             cotacoes={str(k): int(v) for k, v in data.get("cotacoes", {}).items()},
             confianca=data.get("confianca", "alta"),
             raw_response=data.get("raw_response", ""),
+            bypass_validation=bool(data.get("bypass_validation", False)),
         )
 
 

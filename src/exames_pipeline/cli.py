@@ -299,8 +299,18 @@ def main() -> None:
         return
 
     if args.command == "upload":
+        import sys  # noqa: PLC0415
         summary = upload_to_supabase(settings, args.final_json_path, dry_run=args.dry_run)
-        status = "DRY-RUN" if summary.dry_run else "OK"
+        # status=OK só se não houve erros nem itens silenciosamente skipados:
+        # a CLI tem de devolver código != 0 nesse caso para o mcp_server
+        # detectar — caso contrário o sucesso é falso (bug observado em F1/F2 2011).
+        had_failures = bool(summary.errors) or summary.skipped_rows > 0
+        if summary.dry_run:
+            status = "DRY-RUN"
+        elif had_failures:
+            status = "PARTIAL"
+        else:
+            status = "OK"
         print(f"\n[resultado] status={status} "
               f"imagens={len(summary.uploaded_images)} "
               f"upserted={summary.upserted_rows} "
@@ -309,6 +319,8 @@ def main() -> None:
         if summary.errors:
             for err in summary.errors[:10]:
                 print(f"  ❌ {err}")
+        if had_failures and not summary.dry_run:
+            sys.exit(2)
         return
 
     if args.command == "categorize":

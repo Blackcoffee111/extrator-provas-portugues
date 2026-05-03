@@ -976,6 +976,26 @@ def validate_questions(raw_json_path: Path, materia: str = "") -> tuple[Path, Pa
     is_pt = "portugu" in (materia or "").lower() or "portugu" in str(raw_json_path).lower()
     questions = load_questions(raw_json_path)
     questions = sorted(questions, key=_item_sort_key)
+
+    # Limpar observações automáticas de runs anteriores antes de revalidar.
+    # Caso contrário, erros já corrigidos continuariam a aparecer em q.observacoes
+    # → vão para questoes_aprovadas.json → vão para o Supabase como observações
+    # mentirosas. Apenas as notas geradas automaticamente pelos linters (com prefixo
+    # conhecido) são removidas; observações humanas são preservadas.
+    _AUTO_NOTE_PREFIXES = (
+        "[validate][erro]",
+        "[validate][aviso]",
+        "[validate][corrigido]",
+        "[micro-lint][erro]",
+        "[micro-lint][aviso]",
+        "[micro-lint][corrigido]",
+    )
+    for _q in questions:
+        if _q.observacoes:
+            _q.observacoes = [
+                o for o in _q.observacoes
+                if not any(o.startswith(pref) for pref in _AUTO_NOTE_PREFIXES)
+            ]
     trace_map = _load_trace_map(raw_json_path)
     sequence_errors = _validate_numbering_sequence(questions)
     missing_subitem_errors = _validate_missing_subitems(questions)
@@ -992,10 +1012,27 @@ def validate_questions(raw_json_path: Path, materia: str = "") -> tuple[Path, Pa
     cotacoes_global_erros: list[str] = []
     cotacoes_errors_by_id: dict[str, list[str]] = {}
     estrutura_inconsistente = False
+    cotacoes_bypassed = False
     if cotacoes_path.exists():
         try:
             cotacoes = load_cotacoes(cotacoes_path)
-            cotacoes_errors_by_id, cotacoes_global_erros, estrutura_inconsistente = _validate_against_cotacoes(questions, cotacoes)
+            if cotacoes.confianca == "ausente" or not cotacoes.cotacoes:
+                cotacoes_global_erros.append(
+                    "cotacoes_estrutura.json é um stub (confianca='ausente' ou sem entradas). "
+                    "Preencha-o manualmente a partir da tabela de cotações do PDF antes de validar."
+                )
+                cotacoes = None
+            elif cotacoes.bypass_validation:
+                # Escape hatch: agente/humano explicitamente desliga o cross-check.
+                # Não bloqueia outras validações; apenas ignora cotações↔JSON.
+                cotacoes_bypassed = True
+                print(
+                    "[validate] ⚠️  cotacoes_estrutura.json com bypass_validation=true — "
+                    "consistência cotações↔JSON IGNORADA. Outras validações por item continuam."
+                )
+                cotacoes = None
+            else:
+                cotacoes_errors_by_id, cotacoes_global_erros, estrutura_inconsistente = _validate_against_cotacoes(questions, cotacoes)
         except Exception as exc:
             cotacoes_global_erros.append(f"Erro ao carregar cotacoes_estrutura.json: {exc}")
     # Conjunto de números principais que têm pelo menos um subitem

@@ -427,6 +427,10 @@ def _question_to_row(
         # Só incluídos se não-vazios (requerem migração 003_portugues_fields.sql)
         **( {"linhas_referenciadas":     q.linhas_referenciadas}     if q.linhas_referenciadas     else {} ),
         **( {"parametros_classificacao": q.parametros_classificacao} if q.parametros_classificacao else {} ),
+        # Gabaritos de multi_select / complete_table
+        # (requer migração 004_respostas_corretas.sql — só inclui se não-vazio
+        # para não quebrar bases sem migração aplicada).
+        **( {"respostas_corretas":       q.respostas_corretas}       if q.respostas_corretas       else {} ),
         # Metadados
         "pagina_origem": q.pagina_origem,
         "status":        q.status or "approved",
@@ -646,6 +650,16 @@ def upload_to_supabase(
         print(f"[upload] ✅ {summary.upserted_rows} questões inseridas/actualizadas.")
     except SupabaseError as exc:
         summary.errors.append(f"Upsert batch: {exc}")
+        # Diagnóstico específico para colunas em falta — erro PGRST204 indica
+        # que uma migração necessária ainda não foi aplicada na base. Sem este
+        # diagnóstico, o erro fica camuflado como "batch falhou" e o agente
+        # tenta uma a uma, falhando todas as multi_select / complete_table.
+        if exc.status == 400 and ("PGRST204" in exc.body or "Could not find" in exc.body):
+            print(f"[upload] ❌ HTTP 400 PGRST204 — coluna em falta na base.")
+            print(f"[upload]    Detalhe: {exc.body[:300]}")
+            print(f"[upload]    Provavelmente uma migração v2/ ainda não foi aplicada.")
+            print(f"[upload]    Para `respostas_corretas`: aplicar migrations/v2/004_respostas_corretas.sql")
+            print(f"[upload]    e correr `NOTIFY pgrst, 'reload schema';` no Supabase.")
         print(f"[upload] ❌ Batch falhou — a tentar uma a uma…")
         ok = 0
         for row in rows:

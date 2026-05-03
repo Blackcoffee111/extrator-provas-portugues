@@ -85,6 +85,21 @@ def merge_cc(criterios_path: Path, questoes_path: Path, force: bool = False) -> 
     criterios: list[CriterioRaw] = load_criterios(criterios_path)
     questoes:  list[Question]    = load_questions(questoes_path)
 
+    # Pré-condição: id_item nunca pode estar vazio nas questões aprovadas, sob
+    # pena de o merge fazer match em chave "" e juntar critérios errados.
+    questoes_sem_id = [
+        q for q in questoes
+        if not (q.id_item or "").strip() and q.tipo_item != "context_stem"
+    ]
+    if questoes_sem_id:
+        print(
+            f"[cc_merge] ❌ {len(questoes_sem_id)} questão(ões) com id_item vazio — "
+            "merge abortado para evitar associação cruzada."
+        )
+        for q in questoes_sem_id:
+            print(f"  · numero_questao={q.numero_questao} tipo={q.tipo_item}")
+        sys.exit(1)
+
     # Índice de critérios por id_item (normalizado para minúsculas)
     criterio_map: dict[str, CriterioRaw] = {
         c.id_item.lower().strip(): c for c in criterios

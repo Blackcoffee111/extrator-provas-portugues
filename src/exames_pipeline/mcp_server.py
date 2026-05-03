@@ -116,6 +116,170 @@ def _count_json(workspace: str, filename: str) -> int | None:
         return None
 
 
+_UPLOAD_RESULTADO_RE = re.compile(
+    r"\[resultado\]\s+status=\S+\s+imagens=\d+\s+"
+    r"upserted=(?P<upserted>\d+)\s+"
+    r"skipped=(?P<skipped>\d+)\s+"
+    r"erros=(?P<erros>\d+)"
+)
+
+
+def _parse_upload_resultado(stdout: str) -> tuple[int | None, int | None, int | None]:
+    """Extrai (upserted, skipped, erros) da linha [resultado] do upload CLI.
+
+    Devolve (None, None, None) se a linha não for encontrada (formato mudou
+    ou upload falhou antes de chegar ao print final). Quando isto acontece,
+    o caller trata como falha implícita.
+    """
+    m = _UPLOAD_RESULTADO_RE.search(stdout or "")
+    if not m:
+        return None, None, None
+    return (
+        int(m.group("upserted")),
+        int(m.group("skipped")),
+        int(m.group("erros")),
+    )
+
+
+# Campos do overlay cuja edição implica intenção humana de ENVIAR o item ao
+# Supabase. Se algum destes for editado num item órfão (que não existe em
+# final.json), o upload deve BLOQUEAR — não basta avisar — porque o trabalho
+# de revisão humana seria silenciosamente descartado.
+_OVERLAY_FIELDS_CRITICOS = {
+    "enunciado", "alternativas", "resposta_correta", "respostas_corretas",
+    "solucao", "criterios_parciais", "resolucoes_alternativas",
+    "tema", "subtema", "descricao_breve", "tags", "imagens",
+    "palavras_min", "palavras_max", "linhas_referenciadas",
+    "parametros_classificacao", "pool_opcional",
+}
+
+
+def _orphan_overlay_with_content(ws_dir: Path, orphans: list[str]) -> dict[str, list[str]]:
+    """Devolve {id_item: [campo, ...]} para órfãos que editam campos críticos.
+
+    Vazio se overlay órfão só toca metadata (status, observacoes auto, etc.).
+    """
+    if not orphans:
+        return {}
+    overlay_path = ws_dir / "correcoes_humanas.json"
+    if not overlay_path.exists():
+        return {}
+    try:
+        ov = json.loads(overlay_path.read_text(encoding="utf-8"))
+        items = ov.get("items", {}) if isinstance(ov, dict) else {}
+    except Exception:
+        return {}
+
+    result: dict[str, list[str]] = {}
+    for iid in orphans:
+        entry = items.get(iid, {})
+        if not isinstance(entry, dict):
+            continue
+        criticos = sorted(set(entry.keys()) & _OVERLAY_FIELDS_CRITICOS)
+        if criticos:
+            result[iid] = criticos
+    return result
+
+
+def _excluded_items_summary(workspace: str) -> dict[str, Any]:
+    """Recolhe IDs excluídos ao longo do pipeline (validate + merge + sem rastro).
+
+    Devolve um dict com:
+      - validation_errors: list[str]  (IDs em questoes_com_erro.json)
+      - merge_pendente:    list[str]  (IDs em questoes_merge_pendente.json)
+      - silent_drop:       list[str]  (revistos mas não em final.json
+                                       e SEM rastro em com_erro/pendente —
+                                       provavelmente alguém apagou os ficheiros
+                                       intermédios. Bug do tipo F1/F2 2011.)
+      - reviewed_total:    int        (total em questoes_review.json)
+      - final_total:       int        (total em questoes_final.json)
+      - has_exclusions:    bool       (True se QUALQUER exclusão a reportar)
+    """
+    ws_dir = _workspace_path(workspace)
+
+    def _ids(filename: str) -> list[str]:
+        path = ws_dir / filename
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        if not isinstance(data, list):
+            return []
+        return [
+            q.get("id_item") or str(q.get("numero_questao") or "?")
+            for q in data
+            if isinstance(q, dict)
+        ]
+
+    val_err = _ids("questoes_com_erro.json")
+    merge_pend = _ids("questoes_merge_pendente.json")
+    review_ids = _ids("questoes_review.json")
+    final_ids = _ids("questoes_final.json")
+
+    # Silent drop: revistos que NÃO chegaram ao final E não estão noutro
+    # ficheiro de exclusão. Detecta o cenário em que com_erro/pendente foi
+    # apagado, ou em que o final foi materializado a partir dum aprovado
+    # antigo (sem alguns IDs que existiam em review).
+    # Só ativa se houver final.json — se ainda não houve merge, não há
+    # significado em comparar.
+    silent_drop: list[str] = []
+    if final_ids:  # merge já correu
+        known_excl = set(val_err) | set(merge_pend) | set(final_ids)
+        silent_drop = sorted(set(review_ids) - known_excl)
+
+    return {
+        "validation_errors": val_err,
+        "merge_pendente":    merge_pend,
+        "silent_drop":       silent_drop,
+        "reviewed_total":    len(review_ids),
+        "final_total":       len(final_ids),
+        "has_exclusions":    bool(val_err) or bool(merge_pend) or bool(silent_drop),
+    }
+
+
+def _format_exclusions_warning(summary: dict[str, Any]) -> str:
+    """Formata mensagem de aviso destacado sobre itens excluídos.
+
+    Devolve string vazia se não há exclusões.
+    """
+    if not summary["has_exclusions"]:
+        return ""
+
+    val_err = summary["validation_errors"]
+    merge_pend = summary["merge_pendente"]
+    silent = summary.get("silent_drop", [])
+    parts: list[str] = []
+    parts.append("⚠️  ITENS EXCLUÍDOS DO UPLOAD:")
+    if val_err:
+        ids_fmt = ", ".join(val_err)
+        parts.append(
+            f"  • {len(val_err)} rejeitado(s) no validate "
+            f"→ questoes_com_erro.json: {ids_fmt}"
+        )
+    if merge_pend:
+        ids_fmt = ", ".join(merge_pend)
+        parts.append(
+            f"  • {len(merge_pend)} sem critério no merge "
+            f"→ questoes_merge_pendente.json: {ids_fmt}"
+        )
+    if silent:
+        ids_fmt = ", ".join(silent)
+        parts.append(
+            f"  🔥 {len(silent)} SUMIDO(S) SEM RASTRO — revistos mas não em "
+            f"final.json e sem registo em com_erro/pendente: {ids_fmt}\n"
+            f"     (provavelmente os ficheiros de exclusão foram apagados ou "
+            f"o final.json é antigo. Re-correr validate+merge.)"
+        )
+    parts.append(
+        f"  Revistos: {summary['reviewed_total']}  ·  "
+        f"a enviar: {summary['final_total']}  ·  "
+        f"excluídos: {len(val_err) + len(merge_pend) + len(silent)}"
+    )
+    return "\n".join(parts) + "\n"
+
+
 def _count_reviewed(workspace: str) -> tuple[int, int] | None:
     """Devolve (reviewed, total). Prefere questoes_review.json; cai em questoes_raw.json."""
     ws_dir = _workspace_path(workspace)
@@ -162,6 +326,13 @@ def _merge_review_meta(workspace: str) -> str | None:
     _max_ordem = max((m.get("ordem_item") or 0 for m in meta_list), default=0)
     _ITEM_ID_RE = re.compile(r"^(?:[IVX]+-)?(?P<main>\d{1,3})(?:\.(?P<sub>\d{1,2}))?$")
 
+    # Inferir matéria a partir das entradas existentes (este é o pipeline PT,
+    # mas mantém-se a inferência caso o meta venha com "Português" canónico).
+    _materia_default = (
+        meta_list[0].get("materia") if meta_list and meta_list[0].get("materia")
+        else "Português"
+    )
+
     def _meta_fallback(id_: str, ordem: int) -> dict:
         """Gera entrada de meta mínima para itens ausentes do questoes_meta.json."""
         mat = _ITEM_ID_RE.match(id_)
@@ -173,7 +344,7 @@ def _merge_review_meta(workspace: str) -> str | None:
             "ordem_item": ordem,
             "numero_principal": main,
             "subitem": sub,
-            "materia": "Matemática A",
+            "materia": _materia_default,
             "imagens_contexto": [],
             "pagina_origem": None,
             "fonte": "",
@@ -484,6 +655,12 @@ def workspace_status(workspace: str) -> str:
     if outros:
         lines.append(f"  outros ficheiros:    {', '.join(outros)}")
 
+    # Aviso destacado se há itens excluídos do upload (validate/merge/silent_drop)
+    excl = _excluded_items_summary(workspace)
+    if excl["has_exclusions"]:
+        lines.append("")
+        lines.append(_format_exclusions_warning(excl).rstrip())
+
     lines.append("")
     lines.append(f"Próxima acção: {_next_action(ws_dir, workspace)}")
     return "\n".join(lines)
@@ -644,6 +821,13 @@ def run_stage(
         if val_result["ok"]:
             ws.transition("validated")
 
+        # Aviso destacado se validate excluiu itens (foram para questoes_com_erro.json)
+        excl_post_validate = _excluded_items_summary(workspace)
+        validate_excl_warn = (
+            "\n" + _format_exclusions_warning(excl_post_validate)
+            if excl_post_validate["has_exclusions"] else ""
+        )
+
         _phase1_stop = (
             f"\n\n{'═' * 55}\n"
             f"⛔ PARE AQUI. Não chame mais nenhuma tool nesta sessão.\n"
@@ -661,6 +845,7 @@ def run_stage(
             gate_msg
             + f"{lint_ok} micro-lint\n{lint_summary}\n\n"
             + _format_result("validate", val_result)
+            + validate_excl_warn
             + _phase1_stop
         )
 
@@ -806,6 +991,35 @@ def run_stage(
         if not criterios.exists():
             return f"❌ criterios_aprovados.json não encontrado em '{workspace_cc}'. Corre run_stage(stage='cc') primeiro."
 
+        # ── HARD GATE: validation_error em questoes_com_erro.json ────────────
+        # Não bypassável com force=True. Items com erro de validação têm de ser
+        # resolvidos (corrigir + re-validate, ou remover de questoes_review.json)
+        # antes do merge — caso contrário acabam num final.json que não reflecte
+        # o que foi de facto aprovado.
+        com_erro_path = ws_dir / "questoes_com_erro.json"
+        if com_erro_path.exists():
+            try:
+                erro_data = json.loads(com_erro_path.read_text(encoding="utf-8"))
+            except Exception:
+                erro_data = []
+            if isinstance(erro_data, list) and erro_data:
+                ids = [q.get("id_item", "?") for q in erro_data if isinstance(q, dict)]
+                ids_fmt = "\n".join(f"  • {i}" for i in ids)
+                return (
+                    f"❌ HARD GATE: {len(ids)} item(ns) com validation_error em "
+                    f"questoes_com_erro.json:\n{ids_fmt}\n\n"
+                    f"Resolva ANTES do merge (esta gate NÃO é bypassável com force=True):\n"
+                    f"  1. Corrigir o item em questoes_review.json e re-correr "
+                    f"run_stage(stage='validate')\n"
+                    f"  2. OU remover o item de questoes_review.json (se for para descartar)\n"
+                    f"     e re-correr run_stage(stage='validate')\n"
+                    f"  3. Se o erro vier de cotacoes↔JSON: definir "
+                    f"\"bypass_validation\": true em\n"
+                    f"     cotacoes_estrutura.json e re-correr validate\n\n"
+                    f"Motivo: items aqui não vão para o Supabase. Permitir merge "
+                    f"silencia o problema."
+                )
+
         if not force:
             if ws.stage == "cc_merged":
                 return (
@@ -916,6 +1130,10 @@ def run_stage(
                     ws.reset_to("cc_merged")
                 snapshot.unlink(missing_ok=True)
                 url = _start_preview_background(final, "preview", 8798)
+                # Aviso destacado se merge excluiu itens (mesmo com force=True)
+                excl_post_merge = _excluded_items_summary(workspace)
+                if excl_post_merge["has_exclusions"]:
+                    output += "\n\n" + _format_exclusions_warning(excl_post_merge)
                 output += (
                     f"\n\n⚠️  REVISÃO HUMANA OBRIGATÓRIA antes do upload!\n"
                     f"🔍 Preview: {url}\n"
@@ -962,6 +1180,23 @@ def run_stage(
                 f"  4. run_stage(workspace='{workspace}', stage='upload') novamente"
             )
 
+        # Gate: itens excluídos ao longo do pipeline (validate + merge)
+        # Bloqueia upload silencioso de provas incompletas — bug observado em
+        # F1/F2 2011 onde cotações incompletas levaram à rejeição massiva de MC
+        # sem aviso no upload final.
+        excl = _excluded_items_summary(workspace)
+        if excl["has_exclusions"] and not force:
+            return (
+                f"❌ BLOQUEADO: prova incompleta — há itens excluídos do upload.\n\n"
+                f"{_format_exclusions_warning(excl)}\n"
+                f"Opções:\n"
+                f"  • Resolver as exclusões (corrigir cotacoes_estrutura.json,\n"
+                f"    completar criterios ou questoes) e re-correr validate/cc/merge.\n"
+                f"  • Aceitar a prova parcial: run_stage(stage='upload', force=True).\n"
+                f"    Use force=True APENAS após confirmar que os itens listados acima\n"
+                f"    devem mesmo ficar fora do Supabase."
+            )
+
         # Materializar overlay → ficheiro que será enviado
         mat_path, orphans = overlay_mod.materialize(ws_dir, base_final)
         if orphans:
@@ -971,28 +1206,104 @@ def run_stage(
         else:
             orphan_warn = ""
 
-        # Validar contra snapshot aprovado
+        # HARD GATE: overlay órfão com edições humanas críticas.
+        # Caso F1-2012 I-2: humano corrigiu 'alternativas' no preview, mas o item
+        # ficou em questoes_com_erro.json e o overlay ficou órfão (não materializa).
+        # Permitir upload aqui descartaria silenciosamente trabalho do humano.
+        critical_orphans = _orphan_overlay_with_content(ws_dir, orphans)
+        if critical_orphans:
+            details = "\n".join(
+                f"    • {iid}: campos editados = {fields}"
+                for iid, fields in critical_orphans.items()
+            )
+            return (
+                f"❌ HARD GATE: overlay tem correções humanas para "
+                f"{len(critical_orphans)} item(ns) que NÃO estão em final.json:\n"
+                f"{details}\n\n"
+                f"Estas correções foram feitas no preview mas perder-se-iam no "
+                f"upload (item está em questoes_com_erro.json ou foi removido por "
+                f"re-merge).\n\n"
+                f"Resolva ANTES do upload (gate NÃO bypassável com force=True):\n"
+                f"  1. Re-correr validate+merge para trazer o(s) item(ns) de "
+                f"volta para final.json (se a correção humana resolveu o erro)\n"
+                f"  2. OU apagar a entrada órfã de correcoes_humanas.json "
+                f"explicitamente (descartar a correção humana)"
+            )
+
+        # Validar contra snapshot aprovado — HARD GATE não bypassável.
+        # O conteúdo enviado para Supabase TEM de ser exactamente o aprovado
+        # no preview. Bypass com force=True quebraria a garantia "preview = upload"
+        # que o utilizador depende para confiar no upload.
         snapshot_path = ws_dir / "questoes_final.approved_snapshot.json"
-        if not force and snapshot_path.exists():
+        if snapshot_path.exists():
             try:
                 current_data  = json.loads(mat_path.read_text(encoding="utf-8"))
                 snapshot_data = json.loads(snapshot_path.read_text(encoding="utf-8"))
                 if overlay_mod.canonical_hash(current_data) != overlay_mod.canonical_hash(snapshot_data):
+                    n_cur, n_snap = len(current_data), len(snapshot_data)
                     return (
-                        f"❌ BLOQUEADO: o conteúdo mudou após a aprovação humana.\n"
+                        f"❌ HARD GATE: o conteúdo mudou após a aprovação humana.\n"
+                        f"   Preview aprovado: {n_snap} item(ns)  ·  A enviar agora: {n_cur} item(ns)\n"
                         f"   O preview mostrou um estado que já não é o actual.\n\n"
                         f"Passos:\n"
                         f"  1. run_review(workspace='{workspace}') para ver o estado actual\n"
                         f"  2. Revise e clique '✅ Aprovar para Upload' novamente\n"
-                        f"  3. run_stage(workspace='{workspace}', stage='upload')"
+                        f"  3. run_stage(workspace='{workspace}', stage='upload')\n\n"
+                        f"⛔ Esta gate NÃO é bypassável com force=True — se a quer ignorar,\n"
+                        f"   apague {snapshot_path.name} explicitamente."
                     )
-            except Exception:
-                pass  # Se não conseguir comparar, prossegue
+            except Exception as exc:
+                return (
+                    f"❌ Erro ao validar snapshot vs estado actual: {exc}\n"
+                    f"   Não consigo garantir preview=upload. Re-aprovar no preview."
+                )
+
+        # Conta os items que SERÃO enviados (excluindo context_stems que vão
+        # para a tabela `contextos`, não `questoes`) — para reconciliar com o
+        # contador devolvido pelo Supabase abaixo.
+        try:
+            mat_data = json.loads(mat_path.read_text(encoding="utf-8"))
+            n_questoes_a_enviar = sum(
+                1 for q in mat_data
+                if isinstance(q, dict) and q.get("tipo_item") != "context_stem"
+            )
+        except Exception:
+            n_questoes_a_enviar = None
 
         final = mat_path  # Envia o ficheiro materializado (base + overlay)
         result = _run(["upload", str(final)], timeout=1200)
 
-        if result["ok"]:
+        # Aviso destacado se upload com force=True e havia exclusões — para que
+        # o sucesso não dê a impressão de que a prova foi enviada inteira.
+        excl_warn = (
+            "\n" + _format_exclusions_warning(excl)
+            if excl["has_exclusions"] else ""
+        )
+
+        # Reconciliação preview↔Supabase: parse do "[resultado] upserted=X
+        # skipped=Y erros=Z" emitido pela CLI. Detecta itens silenciosamente
+        # descartados durante a conversão para row do Supabase.
+        upserted, skipped, n_errors = _parse_upload_resultado(result.get("stdout", ""))
+        reconciliation_warn = ""
+        upload_truly_ok = result["ok"]
+        if upserted is not None:
+            mismatch = (
+                n_questoes_a_enviar is not None
+                and upserted != n_questoes_a_enviar
+            )
+            if mismatch or (skipped or 0) > 0 or (n_errors or 0) > 0:
+                upload_truly_ok = False
+                reconciliation_warn = (
+                    f"\n❌ RECONCILIAÇÃO FALHOU — preview ≠ Supabase:\n"
+                    f"  • a enviar (questões, sem context_stems): {n_questoes_a_enviar}\n"
+                    f"  • upserted no Supabase:                   {upserted}\n"
+                    f"  • skipped (conversão para row falhou):    {skipped}\n"
+                    f"  • erros reportados pelo upload:           {n_errors}\n\n"
+                    f"⛔ Upload NÃO marcado como sucesso. Investigar antes de\n"
+                    f"   considerar a prova publicada.\n"
+                )
+
+        if upload_truly_ok:
             (ws_dir / ".upload_done").touch()
             ws.transition("uploaded")
             # Backup automático após upload
@@ -1002,9 +1313,15 @@ def run_stage(
                 if backup_result["ok"]
                 else f"\n⚠️  Backup automático falhou: {backup_result['stderr'][:200]}"
             )
-            return orphan_warn + _format_result("upload", result) + backup_msg
+            return (
+                orphan_warn + excl_warn
+                + _format_result("upload", result) + backup_msg
+            )
 
-        return orphan_warn + _format_result("upload", result)
+        return (
+            orphan_warn + excl_warn + reconciliation_warn
+            + _format_result("upload", result)
+        )
 
 
 @mcp.tool()
@@ -1032,10 +1349,20 @@ def run_review(workspace: str) -> str:
     review_flag = _workspace_path(workspace) / ".review_approved"
     status = "✅ Já aprovado" if review_flag.exists() else "⏳ Aguarda aprovação humana"
 
+    # Aviso pré-aprovação: o humano precisa de saber se a prova está incompleta
+    # (validation_errors / merge_pendente / silent_drop) ANTES de clicar
+    # "✅ Aprovar para Upload" — caso contrário aprova achando que está completa.
+    excl = _excluded_items_summary(workspace)
+    excl_warn = (
+        "\n" + _format_exclusions_warning(excl) +
+        "  → Resolva as exclusões antes de aprovar OU confirme que está OK enviar a prova parcial.\n"
+    ) if excl["has_exclusions"] else ""
+
     return (
         f"🔍 Preview: {url}\n"
-        f"   Estado: {status}\n\n"
-        f"Instruções:\n"
+        f"   Estado: {status}\n"
+        + excl_warn +
+        f"\nInstruções:\n"
         f"  1. Revise todas as questões e critérios\n"
         f"  2. Use os botões ✏️ para editar inline qualquer campo\n"
         f"  3. Clique '✅ Aprovar para Upload' na barra inferior quando satisfeito\n"
