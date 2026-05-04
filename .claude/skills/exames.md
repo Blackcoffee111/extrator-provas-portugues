@@ -395,6 +395,19 @@ Colocar o texto num único `criterios_parciais` da questão essay com `pontos` =
 
 **Regra geral:** se um descritor é igual em provas de anos diferentes (CL, níveis 4–1 da C-ED), é genérico → não copiar. Específico = só o Nível 5 da C-ED.
 
+#### 6b.0.1 Espelhar `solucao` em `criterios_parciais`
+
+Para `open_response` e `essay`: depois de preencher `solucao` com a resolução completa, copiar o mesmo texto para `criterios_parciais` (descrição do nível máximo). O preview e o Supabase apresentam-nos por caminhos distintos; deixar `criterios_parciais` só com o descritor C-ED esconde a resposta esperada do classificador humano.
+
+```json
+"solucao": "<resolução completa>",
+"criterios_parciais": [
+  {"nivel": "5", "pontos": 10, "descricao": "<descritor C-ED N5> + <resolução completa>"}
+]
+```
+
+Não aplicar a MC (`solucao` trivial = letra correcta).
+
 #### 6b.1 Match critério ↔ questão — obrigatório
 
 Cada critério em `criterios_raw.json` tem de ter uma questão correspondente em `../<workspace_principal>/questoes_review.json` com o **mesmo `id_item`**. Antes de marcar `"reviewed": true`:

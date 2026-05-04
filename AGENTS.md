@@ -358,6 +358,27 @@ Read("workspace/<NOME>-CC-VD_net/prova.md")
 
 Mapear cada linha (`1. → C`, `2. → A`, …) ao `id_item` correspondente em `criterios_raw.json` e preencher `resposta_correta`. **Apagar** qualquer letra herdada do extractor automático que não bata com o markdown — a tabela na imagem é a fonte de verdade, não o output regex do extractor.
 
+### Espelhar `solucao` em `criterios_parciais`
+
+Para questões de resposta extensa (`open_response`, `essay`), depois de preencher `solucao` (a "Resolução completa" / resposta esperada), **copiar o mesmo texto também para `criterios_parciais`** como descrição do critério principal (tipicamente o do nível de pontuação máxima da C-ED).
+
+Motivo: o preview e o Supabase mostram os dois campos por caminhos diferentes — `solucao` aparece no painel "Ver resolução completa", `criterios_parciais` aparece nos critérios de classificação. O classificador humano deve ver o conteúdo da resolução em ambos os sítios; deixar `criterios_parciais` vazio ou só com o descritor genérico C-ED esconde a resposta esperada do utilizador final.
+
+Padrão para questões essay com tabela C-ED:
+
+```json
+"solucao": "<texto integral da resolução completa>",
+"criterios_parciais": [
+  {
+    "nivel": "5",
+    "pontos": 10,
+    "descricao": "<descritor C-ED do Nível 5> + <texto integral da resolução completa>"
+  }
+]
+```
+
+Não duplicar quando o `solucao` é trivial (ex.: MC só com a letra correcta). Aplica-se sempre que `solucao` contém texto explicativo/argumentativo.
+
 ### Outras verificações
 
 1. **Itens com 0 etapas:** extrair manualmente do `bloco_ocr` ou do `prova.md` (não do PDF).
