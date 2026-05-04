@@ -999,6 +999,39 @@ def run_stage(
         if not criterios.exists():
             return f"❌ criterios_aprovados.json não encontrado em '{workspace_cc}'. Corre run_stage(stage='cc') primeiro."
 
+        # ── HARD GATE: staleness (edição pós-validate ignorada pelo merge) ───
+        # O merge lê questoes_aprovadas.json e criterios_aprovados.json. Se o
+        # agente editou *_review.json depois do último validate, essas edições
+        # ficam isoladas e o questoes_final.json reflecte o estado antigo —
+        # confundindo o humano que vê o preview "sem alterações" mesmo após
+        # um Edit explícito. Detectar por mtime e exigir re-validação.
+        review_q = ws_dir / "questoes_review.json"
+        if review_q.exists() and review_q.stat().st_mtime > approved.stat().st_mtime:
+            return (
+                "❌ questoes_review.json foi editado depois do último validate.\n"
+                f"  Caminho: {review_q}\n"
+                f"  Última edição: review={review_q.stat().st_mtime:.0f} > "
+                f"aprovadas={approved.stat().st_mtime:.0f}\n"
+                "  As edições NÃO estão em questoes_aprovadas.json — o merge ignorá-las-ia\n"
+                "  e o preview mostraria o estado antigo.\n\n"
+                f"  Re-correr: run_stage(workspace='{workspace}', stage='validate')\n"
+                f"  Depois:   run_stage(workspace='{workspace}', stage='merge', "
+                f"workspace_cc='{workspace_cc}')"
+            )
+        raw_cc = ws_cc_dir / "criterios_raw.json"
+        if raw_cc.exists() and raw_cc.stat().st_mtime > criterios.stat().st_mtime:
+            return (
+                "❌ criterios_raw.json foi editado depois do último cc-validate.\n"
+                f"  Caminho: {raw_cc}\n"
+                f"  Última edição: raw={raw_cc.stat().st_mtime:.0f} > "
+                f"aprovados={criterios.stat().st_mtime:.0f}\n"
+                "  As edições NÃO estão em criterios_aprovados.json — o merge ignorá-las-ia.\n\n"
+                f"  Re-correr: run_stage(workspace='{workspace}', stage='cc', "
+                f"workspace_cc='{workspace_cc}')\n"
+                f"  Depois:   run_stage(workspace='{workspace}', stage='merge', "
+                f"workspace_cc='{workspace_cc}')"
+            )
+
         # ── HARD GATE: validation_error em questoes_com_erro.json ────────────
         # Não bypassável com force=True. Items com erro de validação têm de ser
         # resolvidos (corrigir + re-validate, ou remover de questoes_review.json)
