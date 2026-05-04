@@ -379,21 +379,29 @@ def _merge_review_meta(workspace: str) -> str | None:
 
 
 def _find_cc_workspace(workspace: str) -> str | None:
-    """Tenta detectar automaticamente o workspace CC-VD associado pelo prefixo comum."""
+    """Devolve o workspace CC-VD canónico associado ao main, se existir.
+
+    A convenção é determinística:
+      EX-Port639-EE-2023_net   →  EX-Port639-EE-2023-CC-VD_net
+      EX-MatA635-F1-2024       →  EX-MatA635-F1-2024-CC-VD
+
+    Antes era usada heurística de prefixo comum, que falhava silenciosamente:
+    para `EX-Port639-EE-2023_net` o prefixo mais longo era
+    `EX-Port639-EE-2024-CC-VD_net` (17 chars — mesma fase, ano errado),
+    em vez de devolver None quando o CC-VD do ano correcto ainda não existe.
+    """
     if not _WORKSPACE_DIR.exists():
         return None
-    candidates = []
-    for d in _WORKSPACE_DIR.iterdir():
-        if not d.is_dir() or d.name == workspace:
-            continue
-        name_upper = d.name.upper()
-        if "CC" in name_upper or "VD" in name_upper:
-            common = len(os.path.commonprefix([workspace, d.name]))
-            candidates.append((common, d.name))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[0][1]
+    if workspace.endswith("_net"):
+        canonical = workspace[:-4] + "-CC-VD_net"
+        alt = canonical[:-4]  # sem sufixo _net
+    else:
+        canonical = workspace + "-CC-VD"
+        alt = canonical + "_net"
+    for candidate in (canonical, alt):
+        if (_WORKSPACE_DIR / candidate).is_dir():
+            return candidate
+    return None
 
 
 def _workspace_state(ws_dir: Path) -> dict[str, Any]:
