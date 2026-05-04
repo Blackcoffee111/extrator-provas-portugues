@@ -424,13 +424,10 @@ def _question_to_row(
         "pool_opcional":            q.pool_opcional or None,
         "palavras_min":             q.palavras_min,
         "palavras_max":             q.palavras_max,
-        # Só incluídos se não-vazios (requerem migração 003_portugues_fields.sql)
-        **( {"linhas_referenciadas":     q.linhas_referenciadas}     if q.linhas_referenciadas     else {} ),
-        **( {"parametros_classificacao": q.parametros_classificacao} if q.parametros_classificacao else {} ),
-        # Gabaritos de multi_select / complete_table
-        # (requer migração 004_respostas_corretas.sql — só inclui se não-vazio
-        # para não quebrar bases sem migração aplicada).
-        **( {"respostas_corretas":       q.respostas_corretas}       if q.respostas_corretas       else {} ),
+        # Campos PT (requerem migrações 003/004 — sempre incluídos para chaves uniformes no batch)
+        "linhas_referenciadas":     q.linhas_referenciadas     or [],
+        "parametros_classificacao": q.parametros_classificacao or [],
+        "respostas_corretas":       q.respostas_corretas       or [],
         # Metadados
         "pagina_origem": q.pagina_origem,
         "status":        q.status or "approved",
