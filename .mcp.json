@@ -4,9 +4,9 @@
       "command": "/opt/homebrew/bin/python3.11",
       "args": ["-m", "exames_pipeline.mcp_server"],
       "env": {
-        "PYTHONPATH": "/Users/adrianoushinohama/Desktop/Exames Nacionais/src",
-        "PIPELINE_ROOT": "/Users/adrianoushinohama/Desktop/Exames Nacionais",
-        "MINERU_PYTHON": "/Users/adrianoushinohama/Desktop/Exames Nacionais/.venv-mineru/bin/python"
+        "PYTHONPATH": "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues/src",
+        "PIPELINE_ROOT": "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues",
+        "MINERU_PYTHON": "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de matemática/.venv-mineru/bin/python"
       }
     }
   }

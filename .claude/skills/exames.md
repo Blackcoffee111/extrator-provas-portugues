@@ -14,7 +14,7 @@ Invocar com `/exames` para:
 ## 1. Verificar ambiente
 
 ```bash
-PIPELINE_ROOT="/Users/adrianoushinohama/Desktop/Exames Nacionais"
+PIPELINE_ROOT="/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues"
 
 /opt/homebrew/bin/python3.11 -c "import mcp, pymupdf, supabase; print('✅ deps ok')" 2>&1
 $PIPELINE_ROOT/.venv-mineru/bin/mineru --version 2>&1
@@ -33,7 +33,7 @@ Usar `workspace_status(workspace)` sempre que em dúvida sobre o estado de um wo
 > ⚠️ MinerU falha em ambientes sandbox (multiprocessing bloqueado). Pedir ao utilizador para correr no Terminal:
 
 ```bash
-cd "/Users/adrianoushinohama/Desktop/Exames Nacionais"
+cd "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues"
 .venv-mineru/bin/mineru -b pipeline -p "provas fontes/PROVA.pdf" -o workspace/NOME
 # Localizar e copiar o .md gerado:
 find workspace/NOME -name "*.md" | head -1

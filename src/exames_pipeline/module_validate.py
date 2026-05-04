@@ -655,7 +655,9 @@ def _build_json_estrutura(questions: list[Question]) -> dict[str, list[str]]:
     """Constrói o mapa estrutura equivalente ao das cotações a partir dos questions."""
     estrutura: dict[str, list[str]] = {}
     for q in questions:
-        main_str = str(q.numero_principal or q.numero_questao)
+        if q.tipo_item == "context_stem":
+            continue  # context_stems não aparecem nas cotações
+        main_str = q.id_item if q.subitem is None else str(q.numero_principal or q.numero_questao)
         if q.subitem is None:
             estrutura.setdefault(main_str, [])
         else:
@@ -792,9 +794,12 @@ def _validate_against_cotacoes(
                     global_erros.append(f"[baixa confiança] {msg}")
 
     # 3. Itens no JSON cujo id_item não está nas cotações (erro, não aviso)
+    # Context_stems são excluídos: existem no JSON mas nunca nas cotações.
     if cotacoes.estrutura:
         cotacoes_item_ids = set(cotacoes.estrutura.keys())
         for q in top_level_questions:
+            if q.tipo_item == "context_stem":
+                continue
             plain_key = str(q.numero_principal or q.numero_questao)
             if q.id_item not in cotacoes_item_ids and plain_key not in cotacoes_item_ids:
                 msg = (
@@ -1006,35 +1011,68 @@ def validate_questions(raw_json_path: Path, materia: str = "") -> tuple[Path, Pa
         _validate_pt_orphan_children(questions) if is_pt else ({}, {})
     )
 
-    # Carregar tabela de cotações se disponível (gerada pelo módulo_cotacoes)
+    # Carregar manifesto estrutural (gerado por module_cotacoes a partir da
+    # secção COTAÇÕES do prova.md). É obrigatório: serve de fonte de verdade
+    # para o conjunto canónico de IDs do exame.
     cotacoes_path = output_dir / "cotacoes_estrutura.json"
     cotacoes: EstruturaCotacoes | None = None
     cotacoes_global_erros: list[str] = []
     cotacoes_errors_by_id: dict[str, list[str]] = {}
     estrutura_inconsistente = False
     cotacoes_bypassed = False
-    if cotacoes_path.exists():
-        try:
-            cotacoes = load_cotacoes(cotacoes_path)
-            if cotacoes.confianca == "ausente" or not cotacoes.cotacoes:
-                cotacoes_global_erros.append(
-                    "cotacoes_estrutura.json é um stub (confianca='ausente' ou sem entradas). "
-                    "Preencha-o manualmente a partir da tabela de cotações do PDF antes de validar."
-                )
-                cotacoes = None
-            elif cotacoes.bypass_validation:
-                # Escape hatch: agente/humano explicitamente desliga o cross-check.
-                # Não bloqueia outras validações; apenas ignora cotações↔JSON.
-                cotacoes_bypassed = True
-                print(
-                    "[validate] ⚠️  cotacoes_estrutura.json com bypass_validation=true — "
-                    "consistência cotações↔JSON IGNORADA. Outras validações por item continuam."
-                )
-                cotacoes = None
-            else:
-                cotacoes_errors_by_id, cotacoes_global_erros, estrutura_inconsistente = _validate_against_cotacoes(questions, cotacoes)
-        except Exception as exc:
-            cotacoes_global_erros.append(f"Erro ao carregar cotacoes_estrutura.json: {exc}")
+
+    if not cotacoes_path.exists():
+        raise FileNotFoundError(
+            f"cotacoes_estrutura.json não encontrado em {output_dir}.\n"
+            "  O manifesto estrutural é obrigatório — declara o conjunto canónico\n"
+            "  de IDs do exame que será validado contra o JSON estruturado.\n"
+            "  Acções:\n"
+            "    1. Re-correr `run_stage(stage='extract')` se a secção COTAÇÕES\n"
+            "       existe no prova.md mas o parser não foi executado.\n"
+            "    2. Criar manualmente a partir do PDF se o parser falhou\n"
+            "       (formato canónico: ver schemas.EstruturaCotacoes)."
+        )
+
+    try:
+        cotacoes = load_cotacoes(cotacoes_path)
+    except Exception as exc:
+        # Erro de formato/schema: bloquear sempre — sem stub silencioso.
+        raise ValueError(
+            f"cotacoes_estrutura.json inválido: {exc}\n"
+            f"  Caminho: {cotacoes_path}\n"
+            "  Corrigir o ficheiro antes de re-correr o validate."
+        ) from exc
+
+    if cotacoes.confianca == "ausente" or not cotacoes.cotacoes:
+        raise ValueError(
+            f"cotacoes_estrutura.json é um stub (confianca='ausente' ou sem entradas).\n"
+            f"  Caminho: {cotacoes_path}\n"
+            "  Preencher manualmente a partir da tabela de cotações do PDF\n"
+            "  antes de re-correr o validate."
+        )
+
+    if cotacoes.bypass_validation:
+        # Escape hatch auditável: exige bypass_motivo (já validado em load_cotacoes).
+        cotacoes_bypassed = True
+        print(
+            "[validate] ⚠️  cotacoes_estrutura.json com bypass_validation=true — "
+            "cross-check estrutura IGNORADO."
+        )
+        print(f"[validate]    Motivo: {cotacoes.bypass_motivo}")
+        print("[validate]    Outras validações por item continuam.")
+        cotacoes = None
+    else:
+        cotacoes_errors_by_id, cotacoes_global_erros, estrutura_inconsistente = _validate_against_cotacoes(questions, cotacoes)
+        # Validar pools opcionais: cada item declarado num pool deve existir no JSON.
+        json_ids = {q.id_item for q in questions if q.tipo_item != "context_stem"}
+        for pool in cotacoes.pool_opcional:
+            for item_id in pool.get("itens", []):
+                if item_id not in json_ids:
+                    cotacoes_global_erros.append(
+                        f"[POOL] Item '{item_id}' declarado em pool_opcional "
+                        f"(escolher {pool.get('escolher')}) não existe no JSON."
+                    )
+                    estrutura_inconsistente = True
     # Conjunto de números principais que têm pelo menos um subitem
     main_numbers_with_subitems: set[int] = {
         q.numero_principal or q.numero_questao

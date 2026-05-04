@@ -11,13 +11,15 @@ Servidor MCP (Model Context Protocol) que expõe o pipeline de extração de que
 ## Estrutura de diretórios (macOS — este ambiente)
 
 ```
-/Users/adrianoushinohama/Desktop/Exames Nacionais/   ← PIPELINE_ROOT
+/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues/   ← PIPELINE_ROOT
 ├── .env                    ← credenciais (único, na raiz)
 ├── .mcp.json               ← config do servidor MCP
-├── .venv-mineru/           ← Python 3.12 com MinerU instalado
 ├── src/exames_pipeline/    ← código do pipeline (PYTHONPATH aponta aqui/../)
 ├── workspace/              ← workspaces por prova
 └── provas fontes/          ← PDFs originais
+
+# .venv-mineru partilhado (vive na pasta de matemática):
+/Users/adrianoushinohama/dev/Exames Nacionais/Provas de matemática/.venv-mineru/
 ```
 
 ---
@@ -67,9 +69,9 @@ O `.mcp.json` já está na raiz do projecto com os caminhos corretos:
       "command": "/opt/homebrew/bin/python3.11",
       "args": ["-m", "exames_pipeline.mcp_server"],
       "env": {
-        "PYTHONPATH": "/Users/adrianoushinohama/Desktop/Exames Nacionais/src",
-        "PIPELINE_ROOT": "/Users/adrianoushinohama/Desktop/Exames Nacionais",
-        "MINERU_PYTHON": "/Users/adrianoushinohama/Desktop/Exames Nacionais/.venv-mineru/bin/python"
+        "PYTHONPATH": "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues/src",
+        "PIPELINE_ROOT": "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues",
+        "MINERU_PYTHON": "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de matemática/.venv-mineru/bin/python"
       }
     }
   }
@@ -120,9 +122,9 @@ Editar `~/Library/Application Support/Claude/claude_desktop_config.json`:
       "command": "/opt/homebrew/bin/python3.11",
       "args": ["-m", "exames_pipeline.mcp_server"],
       "env": {
-        "PYTHONPATH": "/Users/adrianoushinohama/Desktop/Exames Nacionais/src",
-        "PIPELINE_ROOT": "/Users/adrianoushinohama/Desktop/Exames Nacionais",
-        "MINERU_PYTHON": "/Users/adrianoushinohama/Desktop/Exames Nacionais/.venv-mineru/bin/python"
+        "PYTHONPATH": "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues/src",
+        "PIPELINE_ROOT": "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues",
+        "MINERU_PYTHON": "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de matemática/.venv-mineru/bin/python"
       }
     }
   }
@@ -142,7 +144,7 @@ Adicionar nas configurações MCP do IDE com os mesmos parâmetros acima.
 ### Teste manual (linha de comando)
 
 ```bash
-cd "/Users/adrianoushinohama/Desktop/Exames Nacionais"
+cd "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues"
 
 PYTHONPATH=src PIPELINE_ROOT=$(pwd) MINERU_PYTHON=.venv-mineru/bin/python \
   /opt/homebrew/bin/python3.11 -m exames_pipeline.mcp_server
@@ -209,7 +211,7 @@ Extrai questões de um PDF (módulos 1+2): MinerU → Markdown → JSON draft + 
 
 > ⚠️ **MinerU requer execução fora do sandbox.** Preferir `run_mineru`. Se for necessário correr manualmente no Terminal:
 > ```bash
-> cd "/Users/adrianoushinohama/Desktop/Exames Nacionais"
+> cd "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues"
 > .venv-mineru/bin/mineru -p "provas fontes/PROVA.pdf" -o workspace/NOME -b pipeline
 > # Copiar prova.md e imagens para a raiz do workspace:
 > cp workspace/NOME/NOME/auto/PROVA.md workspace/NOME/prova.md

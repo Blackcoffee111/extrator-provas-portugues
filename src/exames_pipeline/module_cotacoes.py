@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
-from typing import Any
 
 from .config import Settings
 from .schemas import EstruturaCotacoes, dump_cotacoes
@@ -69,8 +67,10 @@ def _parse_cotacoes_from_text(after_heading: str) -> EstruturaCotacoes | None:
     current_parte = ""
     cotacoes: dict[str, int] = {}
     estrutura: dict[str, list[str]] = {}
-    pools_opcionais: dict[str, list[str]] = {}  # "I-opt" → ["I-A-3", "I-B-6", …]
-    _pending_pool: dict[str, Any] = {}           # estado temporário ao processar tabela PT
+    # Estado temporário: por grupo, quantos itens contam ("escolher") declarados pelo texto.
+    _pending_pool_count: dict[str, int] = {}
+    # Estado temporário: por grupo, soma de pontos do pool quando o texto a indica.
+    _pending_pool_pontos: dict[str, int] = {}
 
     def make_id(num_str: str) -> str:
         prefix = current_group
@@ -102,8 +102,8 @@ def _parse_cotacoes_from_text(after_heading: str) -> EstruturaCotacoes | None:
         # Pool opcional: "Destes 5 itens, contribuem ... os 3 itens"
         pool_m = _POOL_OPCIONAL_RE.search(line)
         if pool_m:
-            pool_key = f"{current_group}-opt" if current_group else "opt"
-            _pending_pool[pool_key] = int(pool_m.group(2))  # quantos contam
+            pool_key = current_group or "GLOBAL"
+            _pending_pool_count[pool_key] = int(pool_m.group(2))  # quantos contam
             continue
 
         # Grupo heading: "# GRUPO I", "GRUPO II", etc.
@@ -171,28 +171,44 @@ def _parse_cotacoes_from_text(after_heading: str) -> EstruturaCotacoes | None:
     if not cotacoes:
         return None
 
-    # Inferir pools opcionais: associar itens às chaves de pool por grupo
-    for pool_key in _pending_pool:
-        grp = pool_key.replace("-opt", "")
-        pools_opcionais[pool_key] = [k for k in estrutura if k.startswith(grp + "-") and "." not in k.split("-")[-1]]
+    # Construir lista de pools opcionais no formato canónico
+    pool_opcional: list[dict] = []
+    for grp, escolher in _pending_pool_count.items():
+        grp_prefix = "" if grp == "GLOBAL" else f"{grp}-"
+        itens_do_grupo = [
+            k for k in estrutura
+            if (not grp_prefix or k.startswith(grp_prefix))
+            and "." not in k.split("-")[-1]
+        ]
+        if not itens_do_grupo:
+            continue
+        pool_opcional.append({
+            "pontos": _pending_pool_pontos.get(grp),
+            "itens": sorted(itens_do_grupo),
+            "escolher": escolher,
+        })
 
     top_level = sum(1 for k in estrutura if "." not in k.split("-")[-1])
-    extra = {"pools_opcionais": pools_opcionais} if pools_opcionais else {}
     return EstruturaCotacoes(
         total_itens_principais=top_level,
         estrutura=estrutura,
         cotacoes=cotacoes,
         confianca="alta",
-        raw_response=json.dumps(extra, ensure_ascii=False) if extra else "",
+        raw_response="",
+        pool_opcional=pool_opcional,
     )
 
 
 def extract_cotacoes_estrutura(settings: Settings, markdown_path: Path) -> Path | None:
-    """Extrai a estrutura da prova a partir da secção de cotações.
+    """Extrai o manifesto estrutural a partir da secção COTAÇÕES do prova.md.
 
-    Estratégia:
-    1. Tenta parsear o texto da secção # COTAÇÕES directamente (sem LLM).
-    2. Se o texto não for suficiente (cotações como imagem), usa o LLM configurado.
+    O ficheiro `cotacoes_estrutura.json` declara o **conjunto canónico de IDs
+    de itens** que o exame contém. Os pontos são metadados; o que é validado
+    contra o JSON estruturado é a estrutura (presença/ausência/agrupamento).
+
+    Falha-alto: quando o parser não consegue extrair nada utilizável, retorna
+    None **e não cria o ficheiro**. O `validate` bloqueará explicitamente até
+    que o ficheiro exista no formato canónico — manualmente ou via re-extract.
     """
     markdown_path = markdown_path.resolve()
     if not markdown_path.exists():
@@ -202,24 +218,38 @@ def extract_cotacoes_estrutura(settings: Settings, markdown_path: Path) -> Path 
 
     match = COTACOES_HEADING_PATTERN.search(markdown_text)
     if not match:
+        print("[cotacoes] ⚠️  Secção '# COTAÇÕES' não encontrada no prova.md.")
+        print("[cotacoes]    O 'validate' bloqueará até cotacoes_estrutura.json existir no formato canónico.")
         return None
 
     after_heading = markdown_text[match.end():]
 
-    # --- Tentativa 1: parser de texto (sem LLM) ---
     cotacoes = _parse_cotacoes_from_text(after_heading)
     if cotacoes is not None:
         output_path = markdown_path.parent / "cotacoes_estrutura.json"
         dump_cotacoes(output_path, cotacoes)
-        print(f"[cotacoes] ✅ Estrutura extraída por parser de texto → {output_path}")
+        ids = sorted(cotacoes.cotacoes.keys())
+        print(f"[cotacoes] ✅ Manifesto estrutural extraído ({len(ids)} itens) → {output_path}")
+        if cotacoes.pool_opcional:
+            for pool in cotacoes.pool_opcional:
+                print(f"[cotacoes]    Pool opcional: escolher {pool['escolher']} de {len(pool['itens'])} → {pool['itens']}")
         return output_path
 
-    # Se o parser de texto falhou e a secção tem imagem, o agente deve
-    # criar o cotacoes_estrutura.json manualmente com Read + Edit.
+    # Parser falhou — diagnóstico claro, sem stub silencioso.
     image_match = IMAGE_PATTERN.search(after_heading)
+    print("=" * 70)
+    print("  [cotacoes] PARSER FALHOU — cotacoes_estrutura.json NÃO foi criado")
+    print("=" * 70)
     if image_match:
-        print("[cotacoes] ⚠️  Secção COTAÇÕES contém imagem — parser de texto insuficiente.")
-        print("[cotacoes]    O agente Claude Code deve criar cotacoes_estrutura.json manualmente.")
+        print("  Causa provável: secção COTAÇÕES contém imagem (sem texto parseável).")
     else:
-        print("[cotacoes] ⚠️  Secção COTAÇÕES sem texto parseable e sem imagem.")
+        print("  Causa provável: tabela com formato inesperado ou OCR corrompido.")
+    print("  Acção:")
+    print("    1. Abrir o PDF na página da tabela de cotações.")
+    print(f"    2. Criar manualmente {markdown_path.parent / 'cotacoes_estrutura.json'}")
+    print("       no formato canónico:")
+    print("         {\"cotacoes\": {\"I-1\": 13, ...}, \"estrutura\": {\"I-1\": [], ...},")
+    print("          \"total_itens_principais\": N, \"confianca\": \"alta\"}")
+    print("    3. Re-correr `run_stage(stage='validate')`.")
+    print("=" * 70)
     return None

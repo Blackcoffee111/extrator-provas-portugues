@@ -132,17 +132,31 @@ class Question:
 
 @dataclass(slots=True)
 class EstruturaCotacoes:
+    """Manifesto estrutural do exame derivado da secção COTAÇÕES do prova.md.
+
+    O nome legado refere-se à secção de origem ("cotações"), mas o que esta
+    estrutura representa é o **conjunto canónico de IDs que o exame declara
+    ter** — não os valores em pontos. A validação cross-check usa apenas a
+    chave (id_item) para detectar itens em falta/extra; os pontos são meta-
+    dados informativos. Em PT são uniformes (13/44); o que muda entre anos é
+    a estrutura (Partes A/B/C, pools opcionais, fusões), e é isso que este
+    ficheiro captura.
+    """
     total_itens_principais: int
-    estrutura: dict[str, list[str]]  # "1" -> ["1.1", "1.2"]; "2" -> []
-    cotacoes: dict[str, int]          # "1.1" -> 10, "2" -> 20
-    confianca: str = "alta"           # "alta" | "media" | "baixa"
+    estrutura: dict[str, list[str]]  # "I-1" -> []; "I-A-1" -> []; em MAT: "1" -> ["1.1", "1.2"]
+    cotacoes: dict[str, int]          # mapa id_item → pontos (informativo); chaves = manifesto canónico
+    confianca: str = "alta"           # "alta" | "media" | "baixa" | "ausente"
     raw_response: str = ""
+    # Pools opcionais (Português F2): aluno escolhe N de M itens.
+    # Cada entrada: {"pontos": int|None, "itens": list[str], "escolher": int}.
+    pool_opcional: list[dict] = field(default_factory=list)
     # Escape hatch: quando o parser de cotações falha mas o utilizador prefere
     # não corrigir manualmente toda a tabela, define-se "bypass_validation": true
     # neste ficheiro para que o validate IGNORE a consistência cotações↔JSON.
     # NÃO desliga as outras validações por item — só desactiva o cross-check
-    # estrutural. Imprime aviso destacado para que a decisão fique visível.
+    # estrutural. Exige bypass_motivo não-vazio para auditoria.
     bypass_validation: bool = False
+    bypass_motivo: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -152,11 +166,16 @@ class EstruturaCotacoes:
         return cls(
             total_itens_principais=int(data.get("total_itens_principais", 0)),
             estrutura={str(k): list(v) for k, v in data.get("estrutura", {}).items()},
-            cotacoes={str(k): int(v) for k, v in data.get("cotacoes", {}).items()},
+            cotacoes={str(k): int(round(float(v))) for k, v in data.get("cotacoes", {}).items()},
             confianca=data.get("confianca", "alta"),
             raw_response=data.get("raw_response", ""),
+            pool_opcional=list(data.get("pool_opcional", [])),
             bypass_validation=bool(data.get("bypass_validation", False)),
+            bypass_motivo=str(data.get("bypass_motivo", "")),
         )
+
+
+_VALID_CONFIANCA = {"alta", "media", "baixa", "ausente"}
 
 
 def dump_cotacoes(path: Path, estrutura: EstruturaCotacoes) -> None:
@@ -168,7 +187,48 @@ def dump_cotacoes(path: Path, estrutura: EstruturaCotacoes) -> None:
 
 
 def load_cotacoes(path: Path) -> EstruturaCotacoes:
+    """Carrega cotações no formato canónico estrito.
+
+    Rejeita formatos legados (mapa plano `{"I-1": 13, ...}` ou stubs `{"I-1": {"tipo":"","pontos":null}}`).
+    Quem encontrar um ficheiro num formato antigo deve correr a migração:
+        python scratch/migrate_cotacoes.py
+    """
     raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: esperado um objecto JSON na raiz, recebeu {type(raw).__name__}.")
+    if "cotacoes" not in raw:
+        # Detectar formato plano legado para dar mensagem útil
+        looks_flat = bool(raw) and all(
+            isinstance(k, str) and isinstance(v, (int, float)) for k, v in raw.items()
+        )
+        looks_stub = bool(raw) and all(
+            isinstance(v, dict) and "pontos" in v for v in raw.values()
+        )
+        if looks_flat:
+            hint = (
+                "Detectado formato plano legado `{\"I-1\": 13, ...}`. "
+                "Migra para o formato canónico `{\"cotacoes\": {...}}` "
+                "(ver scratch/migrate_cotacoes.py)."
+            )
+        elif looks_stub:
+            hint = (
+                "Detectado stub vazio `{\"I-1\": {\"tipo\":\"\",\"pontos\":null}}`. "
+                "Preenche manualmente as cotações no formato canónico "
+                "`{\"cotacoes\": {\"I-1\": 13, ...}}`."
+            )
+        else:
+            hint = "Esperada chave 'cotacoes' na raiz."
+        raise ValueError(f"{path}: formato não-canónico. {hint}")
+    confianca = raw.get("confianca", "alta")
+    if confianca not in _VALID_CONFIANCA:
+        raise ValueError(
+            f"{path}: 'confianca' inválida ({confianca!r}); use um de {sorted(_VALID_CONFIANCA)}."
+        )
+    if raw.get("bypass_validation") and not str(raw.get("bypass_motivo", "")).strip():
+        raise ValueError(
+            f"{path}: 'bypass_validation: true' exige 'bypass_motivo' não-vazio "
+            "(motivo auditável da decisão de ignorar o cross-check)."
+        )
     return EstruturaCotacoes.from_dict(raw)
 
 

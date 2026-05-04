@@ -96,7 +96,7 @@ Pipeline Python para extrair, validar, categorizar e publicar questões de prova
 **Princípio fundamental:** nenhum módulo faz chamadas a APIs externas de LLM. Todo o trabalho de inteligência (revisão, categorização, extração de critérios, correção OCR) é feito pelo agente diretamente via ferramentas Read + Edit.
 
 **Repositório:** `Blackcoffee111/extrator-de-questoes` (fork dedicado a Português)  
-**PIPELINE_ROOT:** `/Users/adrianoushinohama/Desktop/Exames Nacionais`
+**PIPELINE_ROOT:** `/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues`
 
 ---
 
@@ -260,13 +260,59 @@ O mesmo contrato aplica-se a `criterios_raw.json` no fluxo CC-VD (sem categoriza
 
 ---
 
-## Verificação `cotacoes_estrutura.json` — após `run_stage(stage='extract')`
+## `cotacoes_estrutura.json` — manifesto estrutural obrigatório
 
-Confirmar formato correto antes de `run_stage(stage='validate')`:
-- ✅ Correto: `"I-1"`, `"II-2.1"` (prefixo de grupo incluído na chave)
-- ❌ Errado: `"I"`, `"II"` como chaves pai sem número de item
+O ficheiro declara o **conjunto canónico de IDs do exame** extraído da secção `# COTAÇÕES` do `prova.md`. O que importa são as chaves (estrutura), não os pontos — em PT os pontos são uniformes (13/44), o que muda entre anos é a estrutura (Partes A/B/C, pools opcionais, fusões).
 
-Se errado, corrigir com `Edit` antes de continuar.
+### Formato canónico (estrito)
+
+```json
+{
+  "total_itens_principais": 15,
+  "estrutura": {"I-A-1": [], "I-A-2": [], "...": []},
+  "cotacoes": {"I-A-1": 13, "I-A-2": 13, "...": 13, "III-1": 44},
+  "confianca": "alta",
+  "raw_response": "",
+  "pool_opcional": [
+    {"pontos": 39, "itens": ["I-A-3", "I-B-6", "II-2", "II-3", "II-5"], "escolher": 3}
+  ],
+  "bypass_validation": false,
+  "bypass_motivo": ""
+}
+```
+
+- Chaves com prefixo de grupo: `"I-1"`, `"I-A-1"`, `"II-2"`, `"III-1"` (nunca `"1"`, `"I"`, `"II"`).
+- Pool opcional: lista de pools, cada um com `pontos` (total da nota), `itens` (IDs candidatos) e `escolher` (quantos contam). Itens declarados em pool **devem** estar também em `cotacoes`/`estrutura` — são itens reais do exame; o pool só restringe quais contam para a nota.
+
+### Gates duros do `validate`
+
+`run_stage(stage='validate')` aborta com erro se:
+- O ficheiro **não existe** (`FileNotFoundError`).
+- O ficheiro está em formato legado (mapa plano `{"I-1": 13}` ou stub `{"I-1": {"pontos": null}}`) — a mensagem aponta para `scratch/migrate_cotacoes.py`.
+- `confianca` é `"ausente"` ou `cotacoes` está vazio.
+- `bypass_validation: true` mas `bypass_motivo` vazio.
+
+### Quando o parser falha
+
+`run_stage(stage='extract')` **não cria stub silencioso**. Se a tabela COTAÇÕES estiver como imagem ou com OCR corrompido, o output diz exactamente o que fazer:
+1. Abrir o PDF na página da tabela.
+2. Criar manualmente `cotacoes_estrutura.json` no formato canónico acima.
+3. Re-correr `run_stage(stage='validate')`.
+
+### Bypass auditável
+
+Se for genuinamente impossível extrair cotações (e.g. página corrompida sem alternativa), criar o ficheiro com:
+```json
+{"cotacoes": {...itens conhecidos...}, "bypass_validation": true, "bypass_motivo": "<porquê>"}
+```
+O `bypass_motivo` é obrigatório — desliga o cross-check estrutura↔JSON mas mantém todas as outras validações por item.
+
+### Migração de ficheiros legados
+
+```
+python scratch/migrate_cotacoes.py                # migra todos os workspaces
+python scratch/migrate_cotacoes.py <path>         # migra um ficheiro específico
+```
 
 ---
 
