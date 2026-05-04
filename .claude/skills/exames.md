@@ -98,6 +98,17 @@ Usar `Read` para ler o `prova.md`. **Ignorar capa, instruções ao aluno e formu
 
 Aplicar apenas quando o erro for **inequívoco** e a forma correta for **observável** no PDF ou noutra parte do próprio documento. Se tiveres de "deduzir" qual devia ser o número da nota ou qual palavra foi perdida, **parar e reportar** (AGENTS.md §5).
 
+**Sempre que o stem contém texto literário, poema, prosa ou outro excerto, abrir o PDF é obrigatório** — não confiar só no markdown do MinerU. O mesmo `Read(file_path=<pdf>, pages=...)` que confirma a numeração de linhas serve para verificar:
+
+| Aspecto | O que conferir | Como corrigir no `enunciado` |
+|---|---|---|
+| Números de linha | Marcadores na margem do excerto (5, 10, 15…) | Formato canónico `\n{N} <linha>` (ver fluxo abaixo) |
+| Formatação | Itálico (citações, palavras estrangeiras), negrito, separação de estrofes/parágrafos, recuos | Markdown: `*itálico*`, `**negrito**`, linha em branco entre estrofes/parágrafos |
+| Sobrescritos | Números marcadores de notas: `palavra²`, `cútis⁸` | Converter `palavra2`/`cútis8`/`cutisº` para Unicode sobrescrito (`²³⁴⁵⁶⁷⁸⁹`); ver §3.3.1 abaixo |
+| Notas / legendas | Bloco "NOTAS": numeração bate com sobrescritos no texto, definição transcrita literalmente | Não reescrever; reportar incoerências |
+
+Se o PDF não permite ver com certeza, marcar `[VERIFICAR]` no sítio em causa e parar — nunca deduzir.
+
 **Quebras de linha e marcadores de numeração — VERIFICAÇÃO OBRIGATÓRIA em cada `context_stem`:**
 
 Regex não é fiável para isto; o agente é responsável por conferir cada `context_stem` visualmente no PDF e aplicar o formato canónico. O `validate` bloqueia se o gate não for cumprido.

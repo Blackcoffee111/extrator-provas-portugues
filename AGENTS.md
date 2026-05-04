@@ -237,6 +237,11 @@ Cada item gerado pelo `run_stage(stage='extract')` tem `"reviewed": false`. O ag
 - Representam o excerto literário (GRUPO I), texto expositivo (GRUPO II) e tema de dissertação (GRUPO III)
 - Revisão obrigatória: tipografia PT («», …, diacríticos), numeração de linhas do excerto, notas de rodapé
 - **Categorização obrigatória**: `tema`, `subtema`, `descricao_breve`, `tags` seguem o mesmo critério granular das questões (ver skill `/exames`, secção 4.2).
+- **Sempre que o stem contém texto literário, poema, prosa ou outro excerto, abrir o PDF é obrigatório** — não confiar só no markdown do MinerU. Usar `get_context_stem_pdf_pages(workspace, id_item)` para localizar o PDF e o intervalo de páginas, e depois `Read(file_path=<pdf>, pages=...)`. Verificar e corrigir, em conjunto:
+  1. **Números de linha** na margem do excerto (mesmo fluxo descrito a seguir).
+  2. **Formatação** — itálico (citações, palavras estrangeiras, ênfase), negrito, separação estrófica nos poemas, recuos, espaçamentos entre parágrafos. Se o MinerU perdeu, repor com markdown (`*itálico*`, `**negrito**`, linha em branco entre estrofes/parágrafos).
+  3. **Números sobrescritos** que marcam notas de rodapé (`palavra²`, `cútis⁸`). O OCR frequentemente entrega `palavra2`, `cutisº`, `cútis8`. Confirmar o número exacto contra o PDF e converter para o caractere sobrescrito Unicode (`²³⁴⁵⁶⁷⁸⁹`). **Nunca deduzir o número** — se o PDF não permite ver com certeza, marcar `[VERIFICAR]` e parar.
+  4. **Legendas e rodapé/notas** — o bloco "NOTAS" (ou equivalente) que define os termos marcados. Confirmar (a) numeração das notas bate com os sobrescritos no texto, (b) o texto da definição é transcrito literalmente do PDF, sem reescrever. Reportar incoerências em vez de "corrigir" silenciosamente.
 - **Verificação obrigatória de números de linha** — gate duro no `validate`:
   1. Para cada `context_stem`, chamar `get_context_stem_pdf_pages(workspace, id_item)` — devolve o PDF, o intervalo de páginas provável e o excerto actual de `prova.md`.
   2. Abrir o PDF nessas páginas com `Read(file_path=<pdf>, pages=...)` e contar visualmente os marcadores de linha na margem do excerto.
