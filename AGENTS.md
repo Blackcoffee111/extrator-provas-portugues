@@ -324,14 +324,28 @@ O extractor já corta o markdown na âncora `# CRITÉRIOS ESPECÍFICOS DE CLASSI
 
 ### O que **ignorar sempre** no CC-VD de Português
 
-São conteúdo genérico, repetido em todas as provas, e **não fazem parte de nenhum critério específico** — não copiar, não transcrever, não tentar ler do PDF:
+São conteúdo genérico, repetido em todas as provas — não copiar, não transcrever, não tentar ler do PDF:
 
-1. **Critérios Gerais de Classificação** — primeiras ~3 páginas do PDF. Preâmbulo legal/operacional do IAVE; o extractor já as descarta automaticamente.
-2. **Tabela C-ED ("Aspectos de conteúdo e de estruturação do discurso")** — grelha N5–N1 com 10 pontos. Aparece dentro de cada item de resposta extensa (Grupo II 8/grupos III). É o mesmo template para todos os anos; o pipeline já modela isto como `parametros_classificacao` no item de essay.
-3. **Tabela CL ("Aspectos de correção linguística")** — grelha de 3 pontos baseada em erros tipo A / tipo B. Igualmente genérica; o pipeline também a cobre via `parametros_classificacao`.
-4. **Quaisquer tabelas/imagens de critérios genéricos** que não tragam conteúdo específico daquele item — não copiar para `solucao` nem `criterios_parciais`.
+1. **Critérios Gerais de Classificação** — primeiras ~3 páginas do PDF. Preâmbulo legal/operacional do IAVE; o extractor já as descarta automaticamente cortando na âncora `# CRITÉRIOS ESPECÍFICOS DE CLASSIFICAÇÃO`.
+2. **Tabela CL ("Aspectos de correção linguística")** — grelha 3 pontos baseada em erros tipo A / tipo B. É o mesmo template em todos os anos; o pipeline já a cobre via `parametros_classificacao`.
 
-Se o agente encontrar uma destas tabelas a contaminar `solucao` ou `criterios_parciais` de um item, **apagar** o texto e deixar só o que é específico daquela questão.
+### Tabela C-ED — capturar **apenas o descritor do nível máximo** via PyMuPDF
+
+A tabela "Aspectos de conteúdo e de estruturação do discurso (C-ED)" tem **descritores específicos** de cada questão — não é genérica como a CL. Mas só o **descritor do nível com pontuação máxima** (tipicamente Nível 5 / 10 pontos) deve ser capturado; os níveis intermédios são derivados.
+
+O MinerU pode não preservar a estrutura tabular fielmente. Usar **PyMuPDF (`fitz`)** para extrair o texto directamente do PDF do CC-VD na página onde está a tabela:
+
+```python
+import fitz
+doc = fitz.open("provas fonte/.../EX-Port639-...-CC.pdf")
+page = doc[N - 1]   # N = página da tabela C-ED do item (1-indexed → 0-indexed)
+text = page.get_text()
+# Localizar o bloco entre "Níveis" e a linha "4" (ou "OU") — é o descritor do Nível 5
+```
+
+Colocar o texto extraído num único `criterios_parciais` da questão essay (ou no campo apropriado), com `pontos` igual à pontuação máxima indicada na bullet ("10 pontos" no exemplo). **Não copiar os níveis 4–1** nem a tabela inteira.
+
+Se o agente encontrar a tabela CL ou descritores intermédios da C-ED a contaminar `solucao`/`criterios_parciais`, **apagar** — deixar só o descritor do nível máximo.
 
 ### Como ler a chave de respostas do GRUPO II (MC)
 

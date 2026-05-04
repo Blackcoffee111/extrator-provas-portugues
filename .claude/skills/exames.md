@@ -372,16 +372,28 @@ run_stage(workspace="NOME", stage="cc", workspace_cc="NOME-CC-VD")
 
 **Não categorizar** no fluxo CC-VD.
 
-#### 6b.0 O que NÃO copiar — conteúdo genérico do CC-VD
+#### 6b.0 O que NÃO copiar / o que copiar via PyMuPDF
 
-O extractor já descarta os "Critérios Gerais de Classificação" (primeiras ~3 páginas do PDF) cortando o markdown na âncora `# CRITÉRIOS ESPECÍFICOS DE CLASSIFICAÇÃO`. Apesar disso, dentro dos itens de resposta extensa repetem-se templates genéricos que **não devem ir para `solucao` nem `criterios_parciais`**:
+**Ignorar sempre** (genérico, igual em todos os anos):
+- **Critérios Gerais de Classificação** — preâmbulo nas primeiras ~3 páginas. O extractor já corta na âncora `# CRITÉRIOS ESPECÍFICOS DE CLASSIFICAÇÃO`.
+- **Tabela CL ("Aspectos de correção linguística")** — grelha 3 pontos tipo A/B. Modelada via `parametros_classificacao`.
 
-- **Tabela C-ED** ("Aspectos de conteúdo e de estruturação do discurso") — grelha N5–N1 com 10 pontos.
-- **Tabela CL** ("Aspectos de correção linguística") — grelha 3 pontos com tipo A / tipo B.
+**Capturar apenas o descritor do nível máximo via PyMuPDF**:
+- **Tabela C-ED ("Aspectos de conteúdo e de estruturação do discurso")** — descritores são específicos de cada questão. Capturar **só o Nível 5** (ou o de pontuação máxima — coincide com o valor da bullet "C-ED ............ N pontos"). Os níveis 4–1 são derivados — não copiar.
 
-Ambas são iguais em todos os anos; o pipeline modela-as via `parametros_classificacao` na questão essay. Se aparecerem dentro de `solucao` ou `criterios_parciais` de um item, **apagar** — deixar apenas o critério específico daquela questão.
+O MinerU pode degradar a estrutura tabular. Ler directamente do PDF com `fitz`:
 
-**Regra geral:** se um conteúdo é igual em provas de anos diferentes, é genérico → não copiar. Não tentar ler o PDF para extrair estas tabelas.
+```python
+import fitz
+doc = fitz.open("provas fonte/.../EX-Port639-...-CC.pdf")
+page = doc[N - 1]   # N = página da tabela C-ED da questão (1-indexed → 0-indexed)
+text = page.get_text()
+# Localizar o bloco entre "Níveis" e a linha "4" (ou "OU") — é o Nível 5
+```
+
+Colocar o texto num único `criterios_parciais` da questão essay com `pontos` = pontuação máxima da bullet (ex.: 10).
+
+**Regra geral:** se um descritor é igual em provas de anos diferentes (CL, níveis 4–1 da C-ED), é genérico → não copiar. Específico = só o Nível 5 da C-ED.
 
 #### 6b.1 Match critério ↔ questão — obrigatório
 
