@@ -504,14 +504,43 @@ def upload_to_supabase(
         summary.errors.append(msg)
         return summary
 
-    # Guard canônico: fonte tem de bater com o formato e matéria desnormalizada
-    # tem de coincidir com a parseada — impede reincidência dos nomes mistos
-    # ("Matematica A", "Prova 635", "Desconhecido", etc.) que já estragaram o schema antes.
+    # Guard canônico: TODAS as fontes têm de ser canónicas E iguais entre si.
+    # Antes era validado só questions[0].fonte — itens com fonte não-canónica
+    # passavam silenciosamente se o primeiro estivesse OK (bug confirmado em
+    # EE-2023: 3 itens com "Exame Final Nacional 639 — Época Especial — 2023"
+    # foram aceites porque I-ctx1 tinha o formato correcto).
+    fontes_distintas: dict[str, list[str]] = {}
+    for q in questions:
+        fontes_distintas.setdefault(q.fonte or "", []).append(q.id_item)
+    if len(fontes_distintas) > 1:
+        detalhe = "; ".join(
+            f"{fonte!r} ({len(ids)} itens, ex.: {ids[:3]})"
+            for fonte, ids in fontes_distintas.items()
+        )
+        msg = (
+            f"Upload bloqueado: fontes divergentes na mesma prova: {detalhe}. "
+            "Todos os itens têm de ter a mesma fonte canónica."
+        )
+        print(f"[upload] ❌ {msg}")
+        summary.errors.append(msg)
+        return summary
+
     fonte_str = questions[0].fonte or ""
     try:
         parsed = _parse_fonte(fonte_str)
     except FonteInvalidaError as exc:
         msg = f"Upload bloqueado: {exc}"
+        print(f"[upload] ❌ {msg}")
+        summary.errors.append(msg)
+        return summary
+
+    sem_materia = [q.id_item for q in questions if not (q.materia or "").strip()]
+    if sem_materia:
+        msg = (
+            f"Upload bloqueado: {len(sem_materia)} item(ns) com 'materia' vazia: "
+            f"{sem_materia}. Preencher 'materia' (esperado {parsed['materia']!r}) "
+            "em questoes_final.json antes do upload."
+        )
         print(f"[upload] ❌ {msg}")
         summary.errors.append(msg)
         return summary
