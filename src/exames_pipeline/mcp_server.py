@@ -43,24 +43,19 @@ mcp = FastMCP(
     "Exames Nacionais Pipeline",
     instructions=(
         "SEQUÊNCIA LINEAR OBRIGATÓRIA — nunca saltar nem paralelizar passos:\n"
-        "  FASE 1 (sessão principal):\n"
         "    1. run_stage(extract, pdf_path='...') ← SEMPRE PRIMEIRO; pré-processa + tenta MinerU auto\n"
         "       Se retornar '⚠️ MinerU falhou': pedir ao utilizador para correr o comando exacto impresso\n"
         "       e depois chamar run_stage(extract) SEM pdf_path — normaliza output automaticamente.\n"
         "    2. AGENTE revê prova.md (Read + Edit)\n"
         "    3. AGENTE revê questoes_review.json (reviewed:true + categorização em cada item)\n"
         "    4. run_stage(validate)  ← só avança quando TODOS os itens tiverem reviewed:true\n"
-        "    5. ⛔ SESSÃO TERMINA AQUI — após validate retornar ✅, NÃO chamar mais nenhuma tool.\n"
-        "       Mostrar a mensagem de handoff ao humano e aguardar o /clear.\n"
-        "       Se o humano pedir para continuar sem fazer /clear, RECUSAR e reenviar o bloco de handoff.\n"
-        "  FASE 2 (sessão nova, só após validate + /clear):\n"
-        "    6. run_stage(cc, pdf_cc_path='...') ← tenta MinerU CC-VD auto; mesmo fallback acima\n"
-        "    7. AGENTE revê criterios_review.json + criterios_ocr_flags.json\n"
+        "    5. run_stage(cc, pdf_cc_path='...') ← tenta MinerU CC-VD auto; mesmo fallback acima\n"
+        "    6. AGENTE revê criterios_review.json + criterios_ocr_flags.json\n"
         "       (para OCR-SUSPECT: usar get_cc_context(); documentar em OCR-RESOLVED: ou OCR-FALSE-POSITIVE:)\n"
-        "    8. run_stage(cc)  ← 2ª chamada (cc_validate)\n"
-        "    9. run_stage(merge)\n"
-        "   10. run_review  ← humano aprova no browser\n"
-        "   11. run_stage(upload)\n"
+        "    7. run_stage(cc)  ← 2ª chamada (cc_validate)\n"
+        "    8. run_stage(merge)\n"
+        "    9. run_review  ← humano aprova no browser\n"
+        "   10. run_stage(upload)\n"
         "Em dúvida: workspace_status(). Correcções pós-merge: run_fix_question() / run_fix_cc() — não destrutivos.\n"
         "NUNCA pedir ao utilizador para correr MinerU antes de tentar run_stage com pdf_path.\n"
         "NUNCA pedir cp manual de prova.md ou images/ — run_stage normaliza o output automaticamente."
@@ -868,25 +863,16 @@ def run_stage(
             if excl_post_validate["has_exclusions"] else ""
         )
 
-        _phase1_stop = (
-            f"\n\n{'═' * 55}\n"
-            f"⛔ PARE AQUI. Não chame mais nenhuma tool nesta sessão.\n"
-            f"{'═' * 55}\n\n"
-            f"FASE 1 concluída — workspace: {workspace}\n\n"
-            f"ACÇÃO DO HUMANO:\n"
-            f"  1. Digite:   /clear\n\n"
-            f"  2. Cole na sessão nova:\n\n"
-            f"  {'─' * 50}\n"
-            f"  Continuar FASE 2 do workspace \"{workspace}\".\n"
-            f"  Invocar /exames para retomar a partir do estado validated.\n"
-            f"  {'─' * 50}\n"
+        _next_step = (
+            f"\n\n📋 Próximo passo: run_stage(workspace='{workspace}', stage='cc', "
+            f"pdf_cc_path='<CAMINHO-CC-VD.pdf>')"
         ) if val_result["ok"] else ""
         return (
             gate_msg
             + f"{lint_ok} micro-lint\n{lint_summary}\n\n"
             + _format_result("validate", val_result)
             + validate_excl_warn
-            + _phase1_stop
+            + _next_step
         )
 
     # ── cc ────────────────────────────────────────────────────────────────────
