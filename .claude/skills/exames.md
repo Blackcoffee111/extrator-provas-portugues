@@ -365,12 +365,23 @@ run_stage(workspace="NOME", stage="cc", workspace_cc="NOME-CC-VD")
 
 `criterios_raw.json` tem itens com `"reviewed": false`. Para cada item:
 1. Verificar: `solucao`, `criterios_parciais`, `resposta_correta` (MC), `resolucoes_alternativas`
-2. Para MC com `resposta_correta` vazia: ler imagem do gabarito no PDF com `Read` e preencher
-3. Para itens de resposta aberta com 0 etapas: extrair do `bloco_ocr` ou PDF com `Edit`
+2. Para MC com `resposta_correta` vazia: **ler `workspace/NOME-CC-VD_net/prova.md`** (output do MinerU) e procurar a tabela "CHAVE DE RESPOSTA" do GRUPO II (ou equivalente). O MinerU transcreve a tabela como markdown — copiar a letra de lá. **Não ler o PDF**: o markdown é a fonte de verdade.
+3. Para itens de resposta aberta com 0 etapas: extrair do `bloco_ocr` ou do `prova.md` do workspace CC. **Não ler o PDF** salvo último recurso.
 4. Corrigir diretamente em `criterios_raw.json`
 5. Setar `"reviewed": true`
 
 **Não categorizar** no fluxo CC-VD.
+
+#### 6b.0 O que NÃO copiar — conteúdo genérico do CC-VD
+
+O extractor já descarta os "Critérios Gerais de Classificação" (primeiras ~3 páginas do PDF) cortando o markdown na âncora `# CRITÉRIOS ESPECÍFICOS DE CLASSIFICAÇÃO`. Apesar disso, dentro dos itens de resposta extensa repetem-se templates genéricos que **não devem ir para `solucao` nem `criterios_parciais`**:
+
+- **Tabela C-ED** ("Aspectos de conteúdo e de estruturação do discurso") — grelha N5–N1 com 10 pontos.
+- **Tabela CL** ("Aspectos de correção linguística") — grelha 3 pontos com tipo A / tipo B.
+
+Ambas são iguais em todos os anos; o pipeline modela-as via `parametros_classificacao` na questão essay. Se aparecerem dentro de `solucao` ou `criterios_parciais` de um item, **apagar** — deixar apenas o critério específico daquela questão.
+
+**Regra geral:** se um conteúdo é igual em provas de anos diferentes, é genérico → não copiar. Não tentar ler o PDF para extrair estas tabelas.
 
 #### 6b.1 Match critério ↔ questão — obrigatório
 

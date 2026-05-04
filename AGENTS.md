@@ -318,10 +318,37 @@ python scratch/migrate_cotacoes.py <path>         # migra um ficheiro específic
 
 ## Verificação `criterios_raw.json` — após 1ª chamada `run_stage(stage='cc')`
 
-1. **GRUPO I (MC):** gabarito está numa imagem → ler com `Read` o PDF e preencher `resposta_correta` manualmente.
-2. **Itens com 0 etapas:** extrair manualmente do `bloco_ocr` ou do PDF com `Edit`.
-3. **Duplicados `II-*`:** se existirem entradas `II-1` (pending) e `1` (parsed), apagar as prefixadas.
-4. **Cobertura integral dos `criterios_parciais`:** O extractor agrega automaticamente o texto do 1.º Processo à `descricao` do último step top-level. Verificar que a `descricao` desse step contém: (a) descrição curta, (b) texto de transição se presente, (c) texto integral do 1.º Processo com todos os sub-passos. **Nunca encurtar nem parafrasear** — se truncado, restaurar do `texto_original`.
+### Onde ler — `prova.md` do workspace CC, não o PDF
+
+O extractor já corta o markdown na âncora `# CRITÉRIOS ESPECÍFICOS DE CLASSIFICAÇÃO` e descarta tudo o que vem antes. **Não tentar ler o PDF do CC-VD para preencher campos que já estão no markdown.** Se algo parece em falta, ler primeiro `workspace/<NOME>-CC-VD_net/prova.md` — o MinerU já transcreveu o texto, incluindo tabelas. O PDF é último recurso (e.g. assinatura/imagem que o MinerU não conseguiu transcrever).
+
+### O que **ignorar sempre** no CC-VD de Português
+
+São conteúdo genérico, repetido em todas as provas, e **não fazem parte de nenhum critério específico** — não copiar, não transcrever, não tentar ler do PDF:
+
+1. **Critérios Gerais de Classificação** — primeiras ~3 páginas do PDF. Preâmbulo legal/operacional do IAVE; o extractor já as descarta automaticamente.
+2. **Tabela C-ED ("Aspectos de conteúdo e de estruturação do discurso")** — grelha N5–N1 com 10 pontos. Aparece dentro de cada item de resposta extensa (Grupo II 8/grupos III). É o mesmo template para todos os anos; o pipeline já modela isto como `parametros_classificacao` no item de essay.
+3. **Tabela CL ("Aspectos de correção linguística")** — grelha de 3 pontos baseada em erros tipo A / tipo B. Igualmente genérica; o pipeline também a cobre via `parametros_classificacao`.
+4. **Quaisquer tabelas/imagens de critérios genéricos** que não tragam conteúdo específico daquele item — não copiar para `solucao` nem `criterios_parciais`.
+
+Se o agente encontrar uma destas tabelas a contaminar `solucao` ou `criterios_parciais` de um item, **apagar** o texto e deixar só o que é específico daquela questão.
+
+### Como ler a chave de respostas do GRUPO II (MC)
+
+A tabela "GRUPO II / ITENS / CHAVE DE RESPOSTA / PONTUAÇÃO" (e a equivalente para a Parte A do GRUPO I em provas com partes) está no `prova.md` do workspace CC como tabela markdown. **Ler de lá, nunca do PDF**:
+
+```
+Read("workspace/<NOME>-CC-VD_net/prova.md")
+# Procurar pelo bloco "GRUPO II" / "CHAVE DE RESPOSTA" e extrair as letras
+```
+
+Mapear cada linha (`1. → C`, `2. → A`, …) ao `id_item` correspondente em `criterios_raw.json` e preencher `resposta_correta`. **Apagar** qualquer letra herdada do extractor automático que não bata com o markdown — a tabela na imagem é a fonte de verdade, não o output regex do extractor.
+
+### Outras verificações
+
+1. **Itens com 0 etapas:** extrair manualmente do `bloco_ocr` ou do `prova.md` (não do PDF).
+2. **Duplicados `II-*`:** se existirem entradas `II-1` (pending) e `1` (parsed), apagar as prefixadas.
+3. **Cobertura integral dos `criterios_parciais`:** O extractor agrega automaticamente o texto do 1.º Processo à `descricao` do último step top-level. Verificar que a `descricao` desse step contém: (a) descrição curta, (b) texto de transição se presente, (c) texto integral do 1.º Processo com todos os sub-passos. **Nunca encurtar nem parafrasear** — se truncado, restaurar do `texto_original`.
 
 ---
 
