@@ -357,6 +357,38 @@ def _merge_review_meta(workspace: str) -> str | None:
             "resolucoes_alternativas": [],
         }
 
+    # ── Gate anti-renumeração ────────────────────────────────────────────────
+    # Se o agente renumerou IDs em questoes_review.json (ex.: corrigiu uma
+    # extração defeituosa onde I-A-2 estava marcado como I-A-1), os IDs em
+    # review e meta desalinham-se: review tem IDs novos que não existem em
+    # meta, e meta tem órfãos que já não estão em review. O merge actual junta
+    # review.enunciado novo com meta.texto_original/source_span/ordem antigo →
+    # mistura silenciosa de conteúdos, validate aceita, agente vê preview com
+    # questão errada associada à pergunta certa.
+    #
+    # Itens novos legítimos (review tem IDs ausentes do meta, mas meta não
+    # tem órfãos) continuam a passar — o `_meta_fallback` cobre esse caso.
+    review_ids = {r.get("id_item", "") for r in review_list if r.get("id_item")}
+    meta_ids = {m.get("id_item", "") for m in meta_list if m.get("id_item")}
+    new_in_review = review_ids - meta_ids
+    orphan_in_meta = meta_ids - review_ids
+    if new_in_review and orphan_in_meta:
+        return (
+            "❌ IDs divergentes entre questoes_review.json e questoes_meta.json — "
+            "provável renumeração:\n"
+            f"  Novos no review (ausentes no meta): {sorted(new_in_review)}\n"
+            f"  Órfãos no meta (apagados do review): {sorted(orphan_in_meta)}\n\n"
+            "  O merge usaria metadados desalinhados (texto_original, source_span,\n"
+            "  ordem_item, página) com o enunciado novo — produzindo questoes_raw\n"
+            "  com pares review↔meta misturados.\n\n"
+            "  Acções:\n"
+            f"    1. Re-extrair (regenera o meta a partir do prova.md corrigido):\n"
+            f"       run_stage(workspace='{workspace}', stage='extract', force=True)\n"
+            "       Categorizações em review.json têm de ser re-aplicadas.\n"
+            "    2. OU alinhar manualmente os IDs em questoes_meta.json para\n"
+            "       coincidirem com review.json antes de validar."
+        )
+
     merged = []
     for r in review_list:
         id_ = r.get("id_item", "")
