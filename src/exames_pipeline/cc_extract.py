@@ -34,14 +34,16 @@ _COTACOES_TRUNCATE_RE = re.compile(r'(?m)^#{0,4}\s*COTA[ÇC][ÕO]ES\b', re.IGNOR
 _GROUP_HEADING_RE = re.compile(r'(?m)^#{1,4}\s*GRUPO\s+([IVX]+)\b', re.IGNORECASE)
 
 # Cabeçalho de item no markdown gerado pelo MinerU:
-#   "1. 12 pontos Opção (C)"   →  MC numa só linha
-#   "2. 14 pontos"             →  aberta, conteúdo nas linhas seguintes
-#   "# 3. 14 pontos"           →  com prefixo de heading markdown
-#   "4.1. 14 pontos"           →  subitem
-#   "5.1. . 14 pontos"         →  ponto extra entre ID e cotação (OCR 2024)
-# Não existem dot-leaders no output do MinerU; o conteúdo pode continuar na mesma linha.
+#   "1. 12 pontos Opção (C)"     →  MC numa só linha
+#   "2. 14 pontos"               →  aberta, conteúdo nas linhas seguintes
+#   "# 3. 14 pontos"             →  com prefixo de heading markdown
+#   "4.1. 14 pontos"             →  subitem
+#   "5.1. . 14 pontos"           →  ponto extra entre ID e cotação (OCR 2024)
+#   "4. Chave: (D) 13 pontos"    →  PT EE-2022: gabarito MC inline antes da cotação
+# Permite até ~40 chars entre o ID e "N pontos" para tolerar "Chave: (X)" e
+# variantes inline; não-greedy e sem newline para não atravessar linhas.
 _ITEM_HEADER_RE = re.compile(
-    r'(?m)^#{0,4}\s*(\d{1,2}(?:\.\d+)?)\.(?:[ \t]*\.)?[ \t]+(\d+)\s*pontos'
+    r'(?m)^#{0,4}\s*(\d{1,2}(?:\.\d+)?)\.(?:[ \t]*\.)?[ \t]+(?:[^\n]{0,40}?[ \t]+)?(\d+)\s*pontos'
 )
 
 # Deteção secundária: linha com ID seguido de texto (pontos não são imediatos).
@@ -55,7 +57,9 @@ _IMPLICIT_POINTS_HEADER_RE = re.compile(r'(?m)^#{0,4}\s*(\d+)\s*pontos\s*$')
 # Detecção de resposta de escolha múltipla
 # Caso 1: "Opção (C)" em qualquer posição no bloco
 _MC_ANSWER_RE = re.compile(r'Op[çc][aã]o\s*\(\s*([A-D])\s*\)', re.IGNORECASE)
-# Caso 2: "(C)" isolado numa linha (sem "Opção") — comum em CC-VD 2024
+# Caso 2: "Chave: (C)" inline no heading — formato PT EE-2022
+_MC_CHAVE_ANSWER_RE = re.compile(r'Chave:\s*\(\s*([A-D])\s*\)', re.IGNORECASE)
+# Caso 3: "(C)" isolado numa linha (sem "Opção") — comum em CC-VD 2024
 _MC_BARE_ANSWER_RE = re.compile(r'(?m)^[ \t]*\(\s*([A-D])\s*\)[ \t]*$')
 
 # Multi-select PT: deteção de respostas no formato "(I)(III)(IV)" ou "I, III, IV"
@@ -212,6 +216,7 @@ class _CCBlock:
     cotacao: int
     text: str
     offset: int = 0   # posição inicial do bloco no texto original (para lookup de grupo)
+    header_line: str = ""  # linha do heading (ex: "4. Chave: (D) 13 pontos") — usada p/ detectar MC inline
 
 
 # ── Auto-correções LaTeX de alta confiança (Matemática A) ────────────────────
@@ -346,6 +351,7 @@ def _segment_blocks(
             cotacao=int(m.group(2)),
             text=text[m.end():end].strip(),
             offset=m.start(),
+            header_line=text[m.start():m.end()],
         ))
 
     found_ids = {b.id_item for b in blocks}
@@ -549,9 +555,14 @@ def extract_cc(
         # Tipos não-MC: nunca aceitar "Opção (X)" como resposta
         tipo_forca_nao_mc = tipo_questao in {"multi_select", "complete_table", "essay"}
 
-        # Caso 1: "Opção (X)" explícito
-        mc_match = None if tipo_forca_nao_mc else _MC_ANSWER_RE.search(block.text)
-        # Caso 2: "(X)" isolado numa linha (sem prefixo "Opção")
+        # Caso 1: "Opção (X)" explícito (procura no body e no header_line)
+        mc_match = None if tipo_forca_nao_mc else (
+            _MC_ANSWER_RE.search(block.text) or _MC_ANSWER_RE.search(block.header_line)
+        )
+        # Caso 2: "Chave: (X)" inline no heading do item — formato PT EE-2022
+        if not mc_match and not tipo_forca_nao_mc:
+            mc_match = _MC_CHAVE_ANSWER_RE.search(block.header_line) or _MC_CHAVE_ANSWER_RE.search(block.text)
+        # Caso 3: "(X)" isolado numa linha (sem prefixo "Opção")
         if not mc_match and not tipo_forca_nao_mc:
             mc_match = _MC_BARE_ANSWER_RE.search(block.text)
         mc_letter = (
