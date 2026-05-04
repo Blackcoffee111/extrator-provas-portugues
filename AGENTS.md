@@ -105,7 +105,9 @@ Pipeline Python para extrair, validar, categorizar e publicar questões de prova
 | Uso | Binário |
 |-----|---------|
 | Pipeline (módulos 1–7) | `/opt/homebrew/bin/python3.11` |
-| MinerU CLI | `.venv-mineru/bin/mineru` (Python 3.12) |
+| MinerU CLI | `/Users/adrianoushinohama/dev/Exames Nacionais/Provas de matemática/.venv-mineru/bin/mineru` (Python 3.12) |
+
+⚠️ **O `.venv-mineru` NÃO está em `Provas de portugues`** — está partilhado em `Provas de matemática` (a pasta-irmã). Usar sempre o caminho absoluto. `.venv-mineru/bin/mineru` (relativo) falha com `no such file or directory`.
 
 ⚠️ Nunca usar `/opt/homebrew/bin/python3` — é 3.14, sem as dependências instaladas.
 
@@ -114,7 +116,8 @@ Pipeline Python para extrair, validar, categorizar e publicar questões de prova
 ## MinerU — sintaxe e restrições
 
 ```bash
-.venv-mineru/bin/mineru -b pipeline -p "provas fontes/<prova>.pdf" -o workspace/<workspace>
+MINERU="/Users/adrianoushinohama/dev/Exames Nacionais/Provas de matemática/.venv-mineru/bin/mineru"
+"$MINERU" -b pipeline -p "provas fonte/<prova>.pdf" -o "workspace/<workspace>"
 ```
 
 - Sempre `-b pipeline` (CPU). GPU consome toda a RAM do M1 Air 8 GB e falha.

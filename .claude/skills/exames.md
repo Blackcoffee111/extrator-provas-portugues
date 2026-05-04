@@ -15,11 +15,14 @@ Invocar com `/exames` para:
 
 ```bash
 PIPELINE_ROOT="/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues"
+MINERU_BIN="/Users/adrianoushinohama/dev/Exames Nacionais/Provas de matemática/.venv-mineru/bin/mineru"
 
 /opt/homebrew/bin/python3.11 -c "import mcp, pymupdf, supabase; print('✅ deps ok')" 2>&1
-$PIPELINE_ROOT/.venv-mineru/bin/mineru --version 2>&1
+"$MINERU_BIN" --version 2>&1
 ls $PIPELINE_ROOT/.env && echo "✅ .env presente" || echo "❌ .env ausente"
 ```
+
+⚠️ O `.venv-mineru` **não vive em `Provas de portugues`** — está partilhado em `Provas de matemática` (pasta-irmã). Usar sempre o caminho absoluto acima. `.venv-mineru/bin/mineru` (relativo) falha com `no such file or directory`.
 
 Se as tools `mcp__exames-pipeline__*` estiverem disponíveis, o servidor MCP está ativo.
 Se não estiverem, instruir o utilizador a reiniciar o Claude Code.
@@ -34,7 +37,8 @@ Usar `workspace_status(workspace)` sempre que em dúvida sobre o estado de um wo
 
 ```bash
 cd "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues"
-.venv-mineru/bin/mineru -b pipeline -p "provas fontes/PROVA.pdf" -o workspace/NOME
+MINERU="/Users/adrianoushinohama/dev/Exames Nacionais/Provas de matemática/.venv-mineru/bin/mineru"
+"$MINERU" -b pipeline -p "provas fonte/PROVA.pdf" -o "workspace/NOME"
 # Localizar e copiar o .md gerado:
 find workspace/NOME -name "*.md" | head -1
 cp <caminho_encontrado> workspace/NOME/prova.md
@@ -361,9 +365,10 @@ Internamente corre micro-lint e depois a validação heurística. Se houver erro
 ### 6a. MinerU no CC-VD (fora do sandbox)
 
 ```bash
-.venv-mineru/bin/mineru -b pipeline \
-  -p "provas fontes/PROVA-CC-VD.pdf" \
-  -o workspace/NOME-CC-VD
+MINERU="/Users/adrianoushinohama/dev/Exames Nacionais/Provas de matemática/.venv-mineru/bin/mineru"
+"$MINERU" -b pipeline \
+  -p "provas fonte/PROVA-CC-VD.pdf" \
+  -o "workspace/NOME-CC-VD"
 cp <caminho_encontrado> workspace/NOME-CC-VD/prova.md
 ```
 
