@@ -1122,10 +1122,20 @@ def run_stage(
         cc_st = ws_cc.cc_stage
 
         if cc_st == "cc_validated":
-            return (
-                f"✅ CC-VD já validado (estado: {cc_st}).\n"
-                f"Próximo passo: run_stage(workspace='{workspace}', stage='merge', workspace_cc='{workspace_cc}')"
+            review_cc = ws_cc_dir / "criterios_review.json"
+            raw_cc_path = ws_cc_dir / "criterios_raw.json"
+            aprovados_cc = ws_cc_dir / "criterios_aprovados.json"
+            stale = aprovados_cc.exists() and (
+                (review_cc.exists() and review_cc.stat().st_mtime > aprovados_cc.stat().st_mtime)
+                or (raw_cc_path.exists() and raw_cc_path.stat().st_mtime > aprovados_cc.stat().st_mtime)
             )
+            if not stale:
+                return (
+                    f"✅ CC-VD já validado (estado: {cc_st}).\n"
+                    f"Próximo passo: run_stage(workspace='{workspace}', stage='merge', workspace_cc='{workspace_cc}')"
+                )
+            # criterios_review.json ou criterios_raw.json foram editados depois do
+            # último cc-validate — cair no fluxo de re-validação abaixo.
 
         if cc_st == "cc_fresh":
             # 1ª chamada: extrair critérios
