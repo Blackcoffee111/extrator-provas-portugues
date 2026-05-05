@@ -405,6 +405,89 @@ def _merge_review_meta(workspace: str) -> str | None:
     return None
 
 
+# Campos omitidos em criterios_review.json (ver cc_extract._REVIEW_EXCLUDED).
+# Têm de ser preservados a partir de criterios_raw.json no merge — o agente
+# nunca os edita.
+_CRITERIOS_REVIEW_EXCLUDED = {"texto_original", "imagens", "fonte"}
+
+
+def _merge_criterios_review(workspace_cc: str) -> str | None:
+    """Merge criterios_review.json (editado pelo agente) → criterios_raw.json
+    antes do cc-validate.
+
+    Análogo ao _merge_review_meta() para o pipeline principal: cc_extract grava
+    dois ficheiros (raw completo + review compacto sem texto_original/imagens/
+    fonte), o agente edita o review, e o validate lê o raw. Sem este merge as
+    edições do agente são silenciosamente ignoradas.
+
+    Devolve mensagem de erro ou None se bem-sucedido. Se criterios_review.json
+    não existir (workspace antigo), não faz nada (None).
+    """
+    ws_dir = _workspace_path(workspace_cc)
+    review_path = ws_dir / "criterios_review.json"
+    raw_path    = ws_dir / "criterios_raw.json"
+
+    if not review_path.exists():
+        return None  # workspace antigo — criterios_raw.json é a única fonte
+
+    if not raw_path.exists():
+        return f"❌ criterios_raw.json não encontrado em '{workspace_cc}'."
+
+    try:
+        review_list: list[dict] = json.loads(review_path.read_text(encoding="utf-8"))
+        raw_list:    list[dict] = json.loads(raw_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return f"❌ Erro ao ler ficheiros de review/raw CC: {exc}"
+
+    raw_by_id = {r.get("id_item", ""): r for r in raw_list}
+
+    # Gate anti-renumeração: se o agente reescreveu o review com IDs novos
+    # enquanto o raw mantém IDs antigos, o merge produziria entradas
+    # desalinhadas (texto_original/imagens/fonte do item antigo emparelhados
+    # com solucao/criterios_parciais/resposta_correta de outra questão).
+    review_ids = {r.get("id_item", "") for r in review_list if r.get("id_item")}
+    raw_ids    = {r.get("id_item", "") for r in raw_list if r.get("id_item")}
+    new_in_review = review_ids - raw_ids
+    orphan_in_raw = raw_ids - review_ids
+    if new_in_review and orphan_in_raw:
+        return (
+            "❌ IDs divergentes entre criterios_review.json e criterios_raw.json — "
+            "provável re-segmentação manual:\n"
+            f"  Novos no review (ausentes no raw): {sorted(new_in_review)}\n"
+            f"  Órfãos no raw (apagados do review): {sorted(orphan_in_raw)}\n\n"
+            "  O merge usaria texto_original/imagens/fonte do raw antigo com a\n"
+            "  solução/critérios novos do review — produzindo critérios com\n"
+            "  metadados de outra questão.\n\n"
+            "  Acções:\n"
+            f"    1. Re-extrair (regenera o raw a partir do CC-VD prova.md):\n"
+            f"       run_stage(stage='cc', workspace_cc='{workspace_cc}', force=True)\n"
+            "       As edições em criterios_review.json têm de ser re-aplicadas.\n"
+            "    2. OU alinhar manualmente os IDs em criterios_raw.json para\n"
+            "       coincidirem com criterios_review.json antes de validar."
+        )
+
+    merged: list[dict] = []
+    for r in review_list:
+        id_ = r.get("id_item", "")
+        base = raw_by_id.get(id_, {})
+        # Preservar do raw apenas os campos omitidos no review; tudo o resto
+        # vem do review (incluindo reviewed, status, observacoes, solucao…).
+        preserved = {
+            k: base.get(k, "" if k != "imagens" else [])
+            for k in _CRITERIOS_REVIEW_EXCLUDED
+        }
+        merged.append({**preserved, **r})
+
+    try:
+        raw_path.write_text(
+            json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception as exc:
+        return f"❌ Erro ao gravar criterios_raw.json: {exc}"
+
+    return None
+
+
 def _find_cc_workspace(workspace: str) -> str | None:
     """Devolve o workspace CC-VD canónico associado ao main, se existir.
 
@@ -989,6 +1072,12 @@ def run_stage(
         raw_cc = ws_cc_dir / "criterios_raw.json"
         if not raw_cc.exists():
             return f"❌ criterios_raw.json não encontrado em '{workspace_cc}'."
+
+        # Merge criterios_review.json (editado pelo agente) → criterios_raw.json.
+        # Sem isto, edições do agente em campos como solucao/resposta_correta/
+        # criterios_parciais/reviewed são silenciosamente ignoradas.
+        if merge_err := _merge_criterios_review(workspace_cc):
+            return merge_err
 
         result = _run(["cc-validate", str(raw_cc)])
         if result["ok"]:
