@@ -883,8 +883,27 @@ def run_stage(
                 )
 
         if result["ok"]:
+            # Re-extrair imagens do PDF original — evita herdar brilho/contraste
+            # do preprocessamento OCR. A CLI tem o mesmo passo, mas só corre
+            # quando ela própria preprocessou (`if not args.no_preprocess`).
+            # Como o MCP preprocessa antes e passa `--no-preprocess` à CLI,
+            # esse caminho nunca é exercido — temos de o fazer aqui, com o
+            # original `pdf_p` que o MCP guardou.
+            reextract_msg = ""
+            if pdf_path:
+                try:
+                    from .module_reextract_images import reextract_images  # noqa: PLC0415
+                    reex = reextract_images(ws_dir, pdf_p.resolve(), verbose=False)
+                    reextract_msg = f"\n[reextract] {reex.message}"
+                except Exception as exc:
+                    reextract_msg = (
+                        f"\n[reextract] ⚠️  Re-extração de imagens falhou: {exc} "
+                        "(imagens preprocessadas mantidas; correr manualmente "
+                        f"`run_stage(stage='reextract-images', pdf_path=...)`)."
+                    )
+
             ws.transition("extracted")
-            return _format_result("extract", result) + (
+            return _format_result("extract", result) + reextract_msg + (
                 f"\n\n📋 Próximos passos:\n"
                 f"  1. Verificar cotacoes_estrutura.json (chaves: 'I-1', 'II-2.1')\n"
                 f"  2. Rever questoes_review.json: reviewed:true + categorização em cada item\n"
