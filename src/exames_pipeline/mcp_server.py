@@ -1138,6 +1138,24 @@ def run_stage(
                 f"  Depois:   run_stage(workspace='{workspace}', stage='merge', "
                 f"workspace_cc='{workspace_cc}')"
             )
+        # Mesma lógica para criterios_review.json — desde que o merge interno
+        # criterios_review→criterios_raw foi adicionado, o caminho canónico de
+        # edição do agente é o review. Sem este gate, edições em review feitas
+        # depois do cc-validate ficariam em raw apenas após nova chamada cc, e
+        # o merge corria com aprovados antigos.
+        review_cc = ws_cc_dir / "criterios_review.json"
+        if review_cc.exists() and review_cc.stat().st_mtime > criterios.stat().st_mtime:
+            return (
+                "❌ criterios_review.json foi editado depois do último cc-validate.\n"
+                f"  Caminho: {review_cc}\n"
+                f"  Última edição: review={review_cc.stat().st_mtime:.0f} > "
+                f"aprovados={criterios.stat().st_mtime:.0f}\n"
+                "  As edições NÃO estão em criterios_aprovados.json — o merge ignorá-las-ia.\n\n"
+                f"  Re-correr: run_stage(workspace='{workspace}', stage='cc', "
+                f"workspace_cc='{workspace_cc}')\n"
+                f"  Depois:   run_stage(workspace='{workspace}', stage='merge', "
+                f"workspace_cc='{workspace_cc}')"
+            )
 
         # ── HARD GATE: validation_error em questoes_com_erro.json ────────────
         # Não bypassável com force=True. Items com erro de validação têm de ser
