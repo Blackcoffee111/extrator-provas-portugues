@@ -295,6 +295,41 @@ def _parse_niveis_desempenho(text: str) -> list[dict]:
 _REVIEW_EXCLUDED = {"texto_original", "imagens", "fonte"}
 
 
+def _mirror_solucao_into_criterios(criterios: list[CriterioRaw]) -> int:
+    """Prepende `solucao` à descricao do 1.º criterios_parciais (open_response/essay).
+
+    Contrato (AGENTS.md §6b.0.1): preview e Supabase mostram solucao e
+    criterios_parciais por caminhos distintos; deixar criterios_parciais só
+    com o descritor C-ED esconde a resposta esperada do classificador.
+    Em vez de pedir ao agente para copiar manualmente, fazemos isso
+    automaticamente após a extração.
+
+    Sem efeito quando:
+      - tipo ∉ {open_response, essay}
+      - solucao vazia/whitespace
+      - criterios_parciais vazio
+      - solucao já presente na descricao do 1.º critério (idempotente)
+    """
+    n = 0
+    for c in criterios:
+        if c.tipo not in {"open_response", "essay"}:
+            continue
+        solucao = (c.solucao or "").strip()
+        if not solucao or not c.criterios_parciais:
+            continue
+        first = c.criterios_parciais[0]
+        descricao = (first.get("descricao") or "").strip()
+        norm_sol = re.sub(r"\s+", " ", solucao).lower()
+        norm_desc = re.sub(r"\s+", " ", descricao).lower()
+        if norm_sol in norm_desc:
+            continue  # já espelhado
+        first["descricao"] = (
+            f"{solucao}\n\n{descricao}" if descricao else solucao
+        )
+        n += 1
+    return n
+
+
 def _dump_review_json(output_dir: Path, criterios: list[CriterioRaw]) -> Path:
     """Grava criterios_review.json sem texto_original e imagens.
 
@@ -745,6 +780,12 @@ def extract_cc(
                         "criterio": criterios[-1].to_dict(),
                     }
                 )
+
+    # Espelhar solucao → 1.º criterios_parciais.descricao (open_response/essay).
+    # Automatiza o contrato AGENTS.md §6b.0.1 antes de gravar o raw.
+    n_mirrored = _mirror_solucao_into_criterios(criterios)
+    if n_mirrored:
+        print(f"[cc_extract] 🪞 solucao espelhada em criterios_parciais: {n_mirrored} item(ns)")
 
     output_path = output_dir / "criterios_raw.json"
     traces_path = output_dir / "criterios_raw.traces.json"
