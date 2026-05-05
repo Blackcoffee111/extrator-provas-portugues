@@ -182,6 +182,18 @@ MinerU (Terminal, fora do sandbox)
 
 ---
 
+## Referência paralela `prova_pymupdf.md`
+
+Sempre que `run_stage(stage='extract', pdf_path=...)` corre, é disparado em background um extractor PyMuPDF que grava `prova_pymupdf.md` no workspace. Termina antes do MinerU.
+
+- **NÃO é o ficheiro a editar.** O ficheiro canónico continua a ser `prova.md` (do MinerU, com imagens/tabelas/estrutura).
+- **Use como segunda fonte** durante a revisão de `prova.md` quando o OCR parecer suspeito: diacríticos esquisitos, sobrescritos perdidos (`palavra2` em vez de `palavra²`), ordinais (`cútisº`), números fundidos, parênteses corrompidos.
+- PyMuPDF lê a **camada de texto nativa** do PDF — não faz OCR. Se o PDF tem texto embutido (caso comum nos exames IAVE), os caracteres são exactos. Onde diverge do `prova.md`, em ~95% dos casos PyMuPDF está certo.
+- **Não copiar cegamente:** PyMuPDF não preserva imagens, tabelas, cabeçalhos markdown nem ordem de leitura multi-coluna. Ler ambos e decidir trecho a trecho.
+- Se `prova_pymupdf.md` não existir (PDF sem camada de texto, ou PyMuPDF falhou silenciosamente), consultar `prova_pymupdf.log` no workspace.
+
+---
+
 ## Máquina de estados por workspace
 
 Cada workspace tem um `state.json` que impõe a progressão — os stages recusam automaticamente operações fora de ordem.
@@ -270,12 +282,16 @@ Cada item gerado pelo `run_stage(stage='extract')` tem `"reviewed": false`. O ag
 `run_stage(stage='validate')` bloqueia se existirem itens com `"reviewed": false`.  
 O mesmo contrato aplica-se a `criterios_raw.json` no fluxo CC-VD (sem categorização).
 
-**Relação pai ↔ filha (`id_contexto_pai`) — obrigatório em provas PT:**
+**Relação pai ↔ filha (`ids_contexto_pai` / `id_contexto_pai`) — obrigatório em provas PT:**
 - Em provas de Português, cada Parte (A/B/C) ou Grupo com texto-âncora tem um único `context_stem` pai das questões daquela parte. Ex.: em 2024, **um texto serve toda a Parte A, outro toda a Parte B**, e assim por diante.
-- O extractor preenche `id_contexto_pai` automaticamente quando deteta o preâmbulo da parte. Mesmo assim, o `validate` corre um gate anti-órfãs:
-  - **ERRO (bloqueia)**: questão com `id_contexto_pai` vazio **e** existe um `context_stem` na mesma `(grupo, parte)`. O agente tem de abrir `questoes_review.json`, ler o enunciado para confirmar que a questão se refere àquele texto, e preencher `id_contexto_pai` com o id do stem indicado no erro.
-  - **AVISO**: questão órfã cujo grupo tem stems em partes diferentes (ex.: `I-C-7` que pede para comparar os textos das Partes A e B). Ler o enunciado e, se houver referência explícita a um desses textos, preencher `id_contexto_pai`; caso contrário, deixar vazio.
-- Quando o erro aparecer, a mensagem diz exactamente que stem usar — basta copiar o id para o campo `id_contexto_pai` do item em `questoes_review.json`.
+- **Campo canónico:** `ids_contexto_pai: list[str]` — lista de IDs de stems pai. A maioria das questões tem 1 elemento. Excepção: questões que comparam múltiplos textos (ex.: `I-C-7` da Parte C, que pede para comparar Parte A com Parte B) — preencher com **todos** os ids referenciados, ex.: `["I-ctx1","I-ctx2"]`.
+- **Campo legado:** `id_contexto_pai: str` — string com o primeiro pai. Mantido para retrocompat. Quando preenches `ids_contexto_pai`, o pipeline deriva `id_contexto_pai` automaticamente. Para questões com pai único basta editar qualquer um dos dois.
+- O extractor preenche `id_contexto_pai`/`ids_contexto_pai` automaticamente quando deteta o preâmbulo da parte. Mesmo assim, o `validate` corre um gate anti-órfãs:
+  - **ERRO (bloqueia)**: questão com lista vazia **e** existe um `context_stem` na mesma `(grupo, parte)`. O agente tem de abrir `questoes_review.json`, ler o enunciado para confirmar a referência, e preencher `ids_contexto_pai` com o(s) id(s) do(s) stem(s).
+  - **AVISO**: questão órfã cujo grupo tem stems em partes diferentes (ex.: `I-C-7`). Ler o enunciado: se referencia 1 texto, preencher com `["<id>"]`; se compara 2+ textos, preencher com a lista completa (ex.: `["I-ctx1","I-ctx2"]`); se nenhum, deixar vazio.
+- **Renderização:** questões com 2+ pais são anexadas após o ÚLTIMO pai (em ordem de documento), com badge visual `🔗 N contextos` no cabeçalho.
+- **Upload Supabase:** com 2+ pais, o pipeline cria automaticamente um *contexto sintético* na BD agregando os textos dos stems referenciados. O frontend continua vendo um único contexto seguido da questão.
+- Para corrigir pós-validate: `run_fix_question(workspace, id_item="I-C-7", field="ids_contexto_pai", value='["I-ctx1","I-ctx2"]')`.
 
 ---
 

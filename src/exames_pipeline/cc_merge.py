@@ -27,6 +27,25 @@ from .schemas import (
 )
 _ITEM_HEADING_RE = re.compile(r"(?m)^#{0,4}\s*(\d{1,2}(?:\.\d+)?)\.(?:[ \t]*\.)?[ \t]+\d+\s*pontos\b")
 _FOREIGN_ITEM_REF_RE = re.compile(r"\b(\d{1,2}(?:\.\d+)?)\.\s+\d+\s*pontos\b", re.IGNORECASE)
+_VERSAO_LINE_RE = re.compile(r"^\s*Versão\s+(\d+)\s*[:\-−–]\s*(.*)$", re.IGNORECASE)
+# Tipos com resposta objectiva onde múltiplas versões da prova partilham o mesmo
+# enunciado mas têm chave diferente. Para o catálogo ficamos só com a Versão 1.
+_TIPOS_VERSAO_FILTRO = {"multi_select", "complete_table", "multiple_choice"}
+
+
+def _keep_only_v1(text: str, tipo: str | None) -> str:
+    """Se `text` contém «Versão 1 ...\\n Versão 2 ...» e o tipo é objectivo,
+    devolve apenas o conteúdo da Versão 1 (sem o rótulo). Caso contrário,
+    devolve `text` intacto."""
+    if tipo not in _TIPOS_VERSAO_FILTRO:
+        return text
+    if not text or "Versão 1" not in text or "Versão 2" not in text:
+        return text
+    for line in text.splitlines():
+        m = _VERSAO_LINE_RE.match(line)
+        if m and m.group(1) == "1":
+            return m.group(2).strip()
+    return text
 
 
 def _strip_group_prefix(item_id: str) -> str:
@@ -172,8 +191,14 @@ def merge_cc(criterios_path: Path, questoes_path: Path, force: bool = False) -> 
             q.respostas_corretas = criterio.respostas_corretas or q.respostas_corretas
             # Limpar resposta_correta para evitar lixo MC herdado de extrações anteriores
             q.resposta_correta = None
-        q.solucao               = criterio.solucao
-        q.criterios_parciais    = criterio.criterios_parciais
+        q.solucao = _keep_only_v1(criterio.solucao, q.tipo_item) if criterio.solucao else criterio.solucao
+        if criterio.criterios_parciais:
+            q.criterios_parciais = [
+                {**cp, "descricao": _keep_only_v1(str(cp.get("descricao", "")), q.tipo_item)}
+                for cp in criterio.criterios_parciais
+            ]
+        else:
+            q.criterios_parciais = criterio.criterios_parciais
         q.resolucoes_alternativas = criterio.resolucoes_alternativas
         final_items.append(q)
         n_merged += 1

@@ -249,6 +249,19 @@ def _render_question(q: Question, index: int, show_context: bool = True, overrid
             f' onclick="approveQuestion(this,\'{item_id}\')">✅ Aprovar</button>'
         )
 
+    # Badge para questões com múltiplos contextos pai (ex: I-C-7 que compara
+    # textos das Partes A e B). Visualiza-se a lista no cabeçalho.
+    multi_pai_badge = ""
+    pais_lista = q.ids_contexto_pai or ([q.id_contexto_pai] if q.id_contexto_pai else [])
+    if len(pais_lista) >= 2:
+        pais_html = ", ".join(html.escape(p) for p in pais_lista)
+        multi_pai_badge = (
+            f'<span class="badge multi-pai-badge" '
+            f'title="Esta questão referencia múltiplos contextos: {pais_html}" '
+            f'style="background:#a855f720;color:#7e22ce;border:1px solid #a855f760">'
+            f'🔗 {len(pais_lista)} contextos</span>'
+        )
+
     header = f"""
   <header class="q-header">
     <span class="header-label">#</span>
@@ -264,6 +277,7 @@ def _render_question(q: Question, index: int, show_context: bool = True, overrid
       <option value="composite"{'selected' if tipo=='composite' else ''}>CP</option>
     </select>
     {_status_badge(status)}
+    {multi_pai_badge}
     {mc_answer_field}
     <button class="header-save-btn" onclick="saveHeader(this)"
       data-orig-id="{item_id}" style="display:none">💾</button>
@@ -1221,7 +1235,7 @@ def _infer_id_contexto_pai_by_position(
     for q, _ in grupo_items:
         if q.tipo_item == "context_stem":
             active_stem = q.id_item or ""
-        elif not (q.id_contexto_pai or ""):
+        elif not (q.ids_contexto_pai or q.id_contexto_pai or ""):
             inferred[q.id_item or ""] = active_stem
     return inferred
 
@@ -1273,12 +1287,28 @@ def _build_pt_grouped_html(
             (q.id_item or ""): [] for q, _ in stems_in_grupo
         }
         orphans: list[tuple["Question", dict]] = []  # sem stem (ex: III-1 essay)
+        # Para questões com múltiplos pais, anexamos sob o ÚLTIMO pai (em ordem
+        # de aparição dos stems no grupo) para que o leitor veja todos os textos
+        # antes da questão. As filhas guardam a lista completa para badge visual.
+        stem_order = {
+            (sq.id_item or ""): pos
+            for pos, (sq, _) in enumerate(stems_in_grupo)
+        }
         for q, ov in regular_in_grupo:
-            pai = q.id_contexto_pai or inferred_pai.get(q.id_item or "", "")
-            if pai and pai in children_by_stem:
-                children_by_stem[pai].append((q, ov))
-            else:
+            pais_lista = q.ids_contexto_pai or (
+                [q.id_contexto_pai] if q.id_contexto_pai else []
+            )
+            if not pais_lista:
+                inferred = inferred_pai.get(q.id_item or "", "")
+                pais_lista = [inferred] if inferred else []
+            # Filtrar pais que efetivamente existem como stems no grupo
+            pais_validos = [p for p in pais_lista if p in children_by_stem]
+            if not pais_validos:
                 orphans.append((q, ov))
+                continue
+            # Anexar à última posição (mais à frente no documento)
+            anchor = max(pais_validos, key=lambda p: stem_order.get(p, -1))
+            children_by_stem[anchor].append((q, ov))
 
         # Renderizar cada stem seguido das suas filhas
         for stem_q, stem_ov in stems_in_grupo:

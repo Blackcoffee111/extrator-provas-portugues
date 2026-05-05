@@ -100,6 +100,65 @@ def _file_exists(workspace: str, filename: str) -> bool:
     return (_workspace_path(workspace) / filename).exists()
 
 
+def _find_source_pdf(workspace_name: str) -> Path | None:
+    """Tenta localizar o PDF original em `provas fonte/` a partir do nome do workspace.
+
+    Cobre variantes nos nomes (ex: `-V1`, `-CC` vs `-CC-VD`, sufixo `_net` opcional).
+    Devolve o primeiro match relevante ou None.
+    """
+    fontes = _REPO_DIR / "provas fonte"
+    if not fontes.exists():
+        return None
+
+    base = workspace_name[:-4] if workspace_name.endswith("_net") else workspace_name
+
+    # Variantes a tentar, em ordem de especificidade.
+    # Para CC-VD: o PDF pode chamar-se "...-CC.pdf" ou "...-CC-VD_net.pdf".
+    candidates_exact = [f"{base}.pdf", f"{base}_net.pdf"]
+    if base.endswith("-CC-VD"):
+        # ex: EX-Port639-EE-2024-CC-VD → tentar também EX-Port639-EE-2024-CC
+        short = base[:-3]  # remove "-VD"
+        candidates_exact += [f"{short}.pdf", f"{short}_net.pdf"]
+
+    for name in candidates_exact:
+        hits = list(fontes.rglob(name))
+        if hits:
+            return hits[0]
+
+    # Fallback: prefix-match com sufixos comuns (-V1, -V2, -2, -1, etc.)
+    for stem in [base] + ([base[:-3]] if base.endswith("-CC-VD") else []):
+        for pattern in (f"{stem}-V*.pdf", f"{stem}-V*_net.pdf",
+                        f"{stem}-[0-9].pdf", f"{stem}-[0-9]_net.pdf"):
+            for hit in sorted(fontes.rglob(pattern)):
+                return hit
+
+    return None
+
+
+def _fire_pymupdf_async(pdf_path: Path, ws_dir: Path, label: str = "") -> None:
+    """Dispara extracção PyMuPDF em background. Não bloqueia. Idempotente:
+    se `prova_pymupdf.md` já existir e for mais recente que o PDF, não re-corre."""
+    out = ws_dir / "prova_pymupdf.md"
+    if out.exists() and pdf_path.exists():
+        if out.stat().st_mtime >= pdf_path.stat().st_mtime:
+            return
+    ws_dir.mkdir(parents=True, exist_ok=True)
+    log_path = ws_dir / "prova_pymupdf.log"
+    try:
+        proc = subprocess.Popen(
+            [_PYTHON, "-m", "exames_pipeline.module_pymupdf_extract",
+             str(pdf_path.resolve()), str(ws_dir.resolve())],
+            env={**os.environ, "PYTHONPATH": str(_REPO_DIR / "src")},
+            cwd=str(_REPO_DIR),
+            stdout=open(log_path, "w"),
+            stderr=subprocess.STDOUT,
+        )
+        tag = f" {label}" if label else ""
+        print(f"[pymupdf]{tag} 🚀 PID {proc.pid} (log: {log_path.name})")
+    except Exception as exc:
+        print(f"[pymupdf] ⚠️  Não foi possível disparar referência: {exc}")
+
+
 def _count_json(workspace: str, filename: str) -> int | None:
     path = _workspace_path(workspace) / filename
     if not path.exists():
@@ -841,6 +900,11 @@ def run_stage(
                 preprocessed = pdf_p
                 print(f"[preprocess] ❌ {exc} — usando PDF original.")
 
+            # Passo 1.5: disparar PyMuPDF em background (referência de texto nativo
+            # para o agente consultar). Não bloqueia MinerU; usa PDF original (não
+            # o pré-processado) para preservar a camada de texto.
+            _fire_pymupdf_async(pdf_p, ws_dir)
+
             # Passo 2: MinerU + cotações + estruturação (timeout 900s para PDFs grandes)
             args = ["extract", str(preprocessed), "--workspace", workspace, "--no-preprocess"]
             result = _run(args, timeout=900)
@@ -861,6 +925,9 @@ def run_stage(
                 )
         elif prova_md.exists():
             # MinerU já foi corrido manualmente e prova.md já foi copiado — só estruturar
+            inferred_pdf = _find_source_pdf(workspace)
+            if inferred_pdf:
+                _fire_pymupdf_async(inferred_pdf, ws_dir)
             args = ["structure", str(prova_md)]
             result = _run(args)
         else:
@@ -869,6 +936,9 @@ def run_stage(
             ws_dir.mkdir(parents=True, exist_ok=True)
             normalized = normalize_mineru_workspace(ws_dir)
             if normalized:
+                inferred_pdf = _find_source_pdf(workspace)
+                if inferred_pdf:
+                    _fire_pymupdf_async(inferred_pdf, ws_dir)
                 args = ["structure", str(normalized)]
                 result = _run(args)
             else:
@@ -992,6 +1062,9 @@ def run_stage(
 
         if not prova_cc_md.exists():
             if pdf_cc_path:
+                # Disparar PyMuPDF em background (referência de texto nativo do CC-VD)
+                _fire_pymupdf_async(Path(pdf_cc_path), ws_cc_dir, label="CC-VD")
+
                 # MinerU CC-VD sem preprocess (PDFs de critérios são texto nítido)
                 # timeout 900s para PDFs grandes
                 cc_args = ["extract", pdf_cc_path, "--workspace", workspace_cc, "--no-preprocess"]
@@ -1019,6 +1092,10 @@ def run_stage(
                 from .pdf_parser import normalize_mineru_workspace  # noqa: PLC0415
                 ws_cc_dir.mkdir(parents=True, exist_ok=True)
                 normalized_cc = normalize_mineru_workspace(ws_cc_dir)
+                if normalized_cc:
+                    inferred_cc_pdf = _find_source_pdf(workspace_cc)
+                    if inferred_cc_pdf:
+                        _fire_pymupdf_async(inferred_cc_pdf, ws_cc_dir, label="CC-VD")
                 if not normalized_cc:
                     return (
                         f"❌ prova.md não encontrado em '{workspace_cc}'.\n\n"
@@ -1602,6 +1679,7 @@ def run_fix_question(
     ALLOWED = {
         "enunciado", "solucao", "resposta_correta", "descricao_breve",
         "tema", "subtema", "tags", "observacoes",
+        "id_contexto_pai", "ids_contexto_pai",
     }
 
     # Construir lista de correções
@@ -1643,14 +1721,14 @@ def run_fix_question(
             )
             continue
 
-        # Campos que esperam array (tags, observacoes): parsear se vier como string
-        if fld in ("tags", "observacoes") and isinstance(fval, str):
+        # Campos que esperam array: parsear se vier como string
+        if fld in ("tags", "observacoes", "ids_contexto_pai") and isinstance(fval, str):
             try:
                 fval = _json.loads(fval)
             except _json.JSONDecodeError:
                 errors.append(
                     f"  • {fid}.{fld}: valor inválido — deve ser JSON array"
-                    f' (ex: ["tag1","tag2"])'
+                    f' (ex: ["I-ctx1","I-ctx2"])'
                 )
                 continue
 

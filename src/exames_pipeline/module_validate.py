@@ -866,15 +866,16 @@ def _validate_pt_stem_integrity(questions: list[Question]) -> tuple[dict[str, li
     for q in questions:
         if q.tipo_item == "context_stem":
             continue
-        pai = q.id_contexto_pai or ""
-        if not pai:
+        pais = q.ids_contexto_pai or ([q.id_contexto_pai] if q.id_contexto_pai else [])
+        if not pais:
             continue
-        if pai not in stem_ids:
-            errors_by_id.setdefault(q.id_item, []).append(
-                f"id_contexto_pai '{pai}' não corresponde a nenhum context_stem existente."
-            )
-        else:
-            stem_children[pai] = stem_children.get(pai, 0) + 1
+        for pai in pais:
+            if pai not in stem_ids:
+                errors_by_id.setdefault(q.id_item, []).append(
+                    f"id_contexto_pai '{pai}' não corresponde a nenhum context_stem existente."
+                )
+            else:
+                stem_children[pai] = stem_children.get(pai, 0) + 1
     for sid, count in stem_children.items():
         if count == 0:
             warnings.append(f"context_stem '{sid}' não tem nenhuma questão filha associada.")
@@ -914,7 +915,7 @@ def _validate_pt_orphan_children(
     for q in questions:
         if q.tipo_item == "context_stem":
             continue
-        if q.id_contexto_pai:
+        if q.ids_contexto_pai or q.id_contexto_pai:
             continue
         grupo = q.grupo or ""
         parte = q.parte or ""

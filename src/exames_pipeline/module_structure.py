@@ -225,6 +225,9 @@ def _assign_id_contexto_pai(
             )
         else:
             q.id_contexto_pai = active_stem.get(q.grupo, "")
+        # Manter lista canónica em sincronia com o pai único auto-atribuído.
+        # Casos com múltiplos pais são preenchidos manualmente pelo agente.
+        q.ids_contexto_pai = [q.id_contexto_pai] if q.id_contexto_pai else []
 
 
 def _apply_group_ids(questions: list[Question]) -> None:

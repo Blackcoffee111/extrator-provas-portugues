@@ -298,6 +298,50 @@ def _extract_notas_rodape(observacoes: list[str]) -> list[dict]:
     return []
 
 
+def _upsert_synthetic_contexto(
+    settings: Settings,
+    headers: dict[str, str],
+    stems: list[Question],
+    combo_key: str,
+    fonte_id: str,
+    url_map: dict[str, str],
+) -> str:
+    """Agrega N context_stems num único contexto sintético (para questões que
+    referenciam múltiplos textos-âncora — ex: I-C-7 a comparar Partes A e B).
+
+    O `id_item_original` é a chave combinada (ex: `I-ctx1+I-ctx2`) para que
+    a tabela `contextos` mantenha unicidade por (fonte_id, id_item_original).
+    """
+    textos = []
+    imagens_agregadas: list[dict] = []
+    notas_agregadas: list[dict] = []
+    for st in stems:
+        cabecalho = f"**[{st.id_item}]**\n\n" if st.id_item else ""
+        textos.append(cabecalho + (st.enunciado or ""))
+        imagens_agregadas.extend(_build_imagens_jsonb(st, url_map))
+        notas_agregadas.extend(_extract_notas_rodape(st.observacoes))
+    texto_agregado = "\n\n---\n\n".join(textos)
+    grupo = stems[0].grupo if stems else ""
+    pagina_origem = next((s.pagina_origem for s in stems if s.pagina_origem), None)
+
+    url = (f"{settings.supabase_url}/rest/v1/contextos"
+           f"?on_conflict=fonte_id,id_item_original")
+    result = _request(
+        "POST", url,
+        {**headers, "Prefer": "return=representation,resolution=merge-duplicates"},
+        {
+            "fonte_id":         fonte_id,
+            "texto":            texto_agregado,
+            "imagens":          imagens_agregadas,
+            "grupo":            grupo,
+            "id_item_original": combo_key,
+            "pagina_origem":    pagina_origem,
+            "notas_rodape":     notas_agregadas,
+        },
+    )
+    return (result[0] if isinstance(result, list) else result)["id"]
+
+
 def _upsert_contexto(
     settings: Settings,
     headers: dict[str, str],
@@ -617,6 +661,40 @@ def upload_to_supabase(
 
     print(f"[upload] {len(contexto_map)} contextos resolvidos.")
 
+    # ── 3.5. Contextos sintéticos para questões com múltiplos pais ────────────
+    # Para questões cujo `ids_contexto_pai` lista ≥2 stems (ex: I-C-7 que
+    # compara textos das Partes A e B), agregar os textos num contexto único
+    # e linkar a questão a ele. Mantém o esquema BD inalterado (1:1 questão↔contexto).
+    stem_map: dict[str, Question] = {
+        q.id_item: q for q in questions if q.tipo_item == "context_stem"
+    }
+    multi_pai_keys: set[tuple[str, ...]] = set()
+    for q in questions:
+        if q.tipo_item == "context_stem":
+            continue
+        pais = list(q.ids_contexto_pai or [])
+        if len(pais) >= 2:
+            multi_pai_keys.add(tuple(sorted(pais)))
+
+    for combo in multi_pai_keys:
+        combo_key = "+".join(combo)
+        stems_combo = [stem_map.get(p) for p in combo]
+        if not all(stems_combo):
+            print(f"[upload] ⚠️  Contexto sintético {combo_key}: stem(s) em falta — saltado.")
+            continue
+        if dry_run:
+            contexto_map[combo_key] = f"dry-run-ctx-{combo_key}"
+            continue
+        try:
+            ctx_id = _upsert_synthetic_contexto(
+                settings, headers, stems_combo, combo_key, fonte_id, url_map,
+            )
+            contexto_map[combo_key] = ctx_id
+            print(f"[upload] 🔗 contexto sintético {combo_key} → {ctx_id[:8]}…")
+        except SupabaseError as exc:
+            summary.errors.append(f"Contexto sintético {combo_key}: {exc}")
+            print(f"[upload] ❌ Contexto sintético {combo_key}: {exc}")
+
     # ── 4. Preparar rows de questões ──────────────────────────────────────────
     rows: list[dict[str, Any]] = []
     for q in questions:
@@ -624,13 +702,19 @@ def upload_to_supabase(
             continue  # já tratado em contextos
 
         # Descobrir contexto_id. Ordem de preferência:
+        # 0. ids_contexto_pai com ≥2 ids → contexto sintético agregado (Português PT)
         # 1. id_contexto_pai explícito (Português — preenchido pelo extractor/agente)
         # 2. Prefixo antes do primeiro ponto em id_item (Matemática — "II-1.1" → "II-1")
         # 3. numero_principal (formatos antigos sem grupo)
         # 4. Fallback PT: "<grupo>-ctx"
         contexto_id: str | None = None
-        if q.id_contexto_pai:
+        pais_lista = list(q.ids_contexto_pai or [])
+        if len(pais_lista) >= 2:
+            contexto_id = contexto_map.get("+".join(sorted(pais_lista)))
+        if contexto_id is None and q.id_contexto_pai:
             contexto_id = contexto_map.get(q.id_contexto_pai)
+        if contexto_id is None and len(pais_lista) == 1:
+            contexto_id = contexto_map.get(pais_lista[0])
         if contexto_id is None and "." in q.id_item:
             pai = q.id_item.split(".")[0]
             contexto_id = contexto_map.get(pai)

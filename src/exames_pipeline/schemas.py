@@ -13,6 +13,22 @@ class Alternative:
     texto: str
 
 
+def _normalize_ids_contexto_pai(data: dict) -> list[str]:
+    """Devolve a lista canónica de pais. Aceita formato novo (`ids_contexto_pai`),
+    formato legado (`id_contexto_pai` string única) ou ambos."""
+    raw_list = data.get("ids_contexto_pai")
+    if isinstance(raw_list, list) and raw_list:
+        return [str(x).strip() for x in raw_list if str(x).strip()]
+    legacy = str(data.get("id_contexto_pai", "")).strip()
+    return [legacy] if legacy else []
+
+
+def _first_id_contexto_pai(data: dict) -> str:
+    """Primeiro pai (ou string vazia). Mantém compatibilidade com código legado."""
+    ids = _normalize_ids_contexto_pai(data)
+    return ids[0] if ids else ""
+
+
 @dataclass(slots=True)
 class Question:
     numero_questao: int
@@ -38,7 +54,13 @@ class Question:
     texto_original: str = ""
     source_span: dict[str, int] | None = None
     enunciado_contexto_pai: str = ""
-    id_contexto_pai: str = ""   # ID do context_stem pai (ex: "I-ctx1", "II-ctx1")
+    # Lista de IDs de context_stems pai (ex: ["I-ctx1"] ou ["I-ctx1","I-ctx2"]).
+    # A maioria das questões tem 0 ou 1 pai; a lista permite questões que
+    # referenciam múltiplos textos-âncora (ex: I-C-7 que compara Parte A com Parte B).
+    ids_contexto_pai: list[str] = field(default_factory=list)
+    # Retrocompat: campo string com o primeiro pai. Mantido para serialização
+    # de ficheiros antigos e código que lê o pai único. Derivado de ids_contexto_pai.
+    id_contexto_pai: str = ""
     grupo_ids: list[str] = field(default_factory=list)
     descricoes_imagens: dict[str, str] = field(default_factory=dict)
     descricao_breve: str = ""
@@ -110,7 +132,8 @@ class Question:
             texto_original=data.get("texto_original", ""),
             source_span=data.get("source_span"),
             enunciado_contexto_pai=data.get("enunciado_contexto_pai", ""),
-            id_contexto_pai=data.get("id_contexto_pai", ""),
+            ids_contexto_pai=_normalize_ids_contexto_pai(data),
+            id_contexto_pai=_first_id_contexto_pai(data),
             grupo_ids=list(data.get("grupo_ids", [])),
             descricoes_imagens=dict(data.get("descricoes_imagens", {})),
             descricao_breve=data.get("descricao_breve", ""),
@@ -263,7 +286,8 @@ REVIEW_FIELDS: frozenset[str] = frozenset({
     "reviewed",              # gate do validate
     "imagens",               # refs de imagens a verificar
     "enunciado_contexto_pai",# contexto do group stem para subitens
-    "id_contexto_pai",        # ID do context_stem pai (ex: "I-ctx1")
+    "id_contexto_pai",        # legado — ID do context_stem pai único (ex: "I-ctx1")
+    "ids_contexto_pai",       # canónico — lista de pais (ex: ["I-ctx1","I-ctx2"])
     "grupo",                 # "I", "II", "III"
     "parte",                 # "A", "B", "C" (só GRUPO I em provas PT)
     "solucao",               # questões abertas / dissertação
