@@ -319,10 +319,19 @@ def _mirror_solucao_into_criterios(criterios: list[CriterioRaw]) -> int:
             continue
         first = c.criterios_parciais[0]
         descricao = (first.get("descricao") or "").strip()
-        norm_sol = re.sub(r"\s+", " ", solucao).lower()
-        norm_desc = re.sub(r"\s+", " ", descricao).lower()
-        if norm_sol in norm_desc:
-            continue  # já espelhado
+
+        # Idempotente apenas se solucao já estiver no INÍCIO. Não basta
+        # estar presente — o extractor (_attach_p1_to_last_step) costuma
+        # anexar o 1.º Processo ao fim da descricao, e nesse caso o
+        # contrato pede para movê-lo para o início.
+        if descricao.startswith(solucao):
+            continue
+
+        # Se a solucao já aparecer noutro local (tipicamente no fim),
+        # remover essa ocorrência para evitar duplicação ao prepender.
+        if solucao in descricao:
+            descricao = descricao.replace(solucao, "", 1).strip()
+
         first["descricao"] = (
             f"{solucao}\n\n{descricao}" if descricao else solucao
         )

@@ -78,6 +78,7 @@ A revisão do `prova.md` e do `questoes_review.json` é **transcrição com corr
 - **Nunca alterar definições nas NOTAS** (secção "NOTAS" do excerto). As definições são transcritas do PDF; o agente não tem autoridade para as corrigir, clarificar ou expandir.
 - **Nunca deduzir um número de nota por raciocínio** (ex: "a nota 9 cobre Antony e Fausto, logo Fausto deve ser ⁹"). Se os números não batem certo, assinalar e parar.
 - **Nunca preencher lacunas** no texto original — se o OCR perdeu uma palavra ou frase, marcar com `[ILEGÍVEL]` e reportar ao utilizador. Não inventar o que podia estar lá.
+- **Nunca remover lacunas intencionais do enunciado** (espaços sublinhados `_____`, traços longos `———`, ou sequências equivalentes que representam o local onde o aluno deve preencher). São parte da formulação do exame em itens de completar (`complete_table`, frases-lacuna do GRUPO II, etc.). Se o OCR transcreveu a lacuna como `_____`, `\_\_\_\_`, `——` ou similar, **manter exatamente** — converter apenas para uma forma canónica consistente (ex.: `_____` com 5 underscores) sem suprimir.
 - **Nunca reescrever frases** do enunciado ou das NOTAS para as tornar mais claras ou gramaticalmente corretas. Mesmo que pareça errado, pode ser a formulação exata do exame.
 - **Nunca usar o conhecimento geral** sobre a obra, o autor ou o tema para "completar" ou "corrigir" o texto. O PDF é o árbitro — o agente não leu o PDF.
 
@@ -240,14 +241,24 @@ Cada item gerado pelo `run_stage(stage='extract')` tem `"reviewed": false`. O ag
 - Representam o excerto literário (GRUPO I), texto expositivo (GRUPO II) e tema de dissertação (GRUPO III)
 - Revisão obrigatória: tipografia PT («», …, diacríticos), numeração de linhas do excerto, notas de rodapé
 - **Categorização obrigatória**: `tema`, `subtema`, `descricao_breve`, `tags` seguem o mesmo critério granular das questões (ver skill `/exames`, secção 4.2).
+<!-- DESACTIVADO 2026-05-05 — em teste o fluxo PyMuPDF-only. A leitura directa de PDFs com Read está bloqueada por hook (.claude/hooks/block_pdf_read.py).
 - **Sempre que o stem contém texto literário, poema, prosa ou outro excerto, abrir o PDF é obrigatório** — não confiar só no markdown do MinerU. Usar `get_context_stem_pdf_pages(workspace, id_item)` para localizar o PDF e o intervalo de páginas, e depois `Read(file_path=<pdf>, pages=...)`. Verificar e corrigir, em conjunto:
+-->
+- **Verificar texto literário/poema/prosa contra o PDF — apenas via PyMuPDF (`fitz`)**, nunca com a tool `Read` (bloqueada por hook). Usar `get_context_stem_pdf_pages(workspace, id_item)` para localizar PDF e intervalo de páginas, e depois extrair só o que precisa via Bash:
+
+  ```bash
+  /opt/homebrew/bin/python3.11 -c "import fitz; doc=fitz.open('CAMINHO.pdf'); \
+  print(doc[N-1].get_text())"   # N = página 1-indexed
+  ```
+
+  Verificar e corrigir, em conjunto:
   1. **Números de linha** na margem do excerto (mesmo fluxo descrito a seguir).
   2. **Formatação** — itálico (citações, palavras estrangeiras, ênfase), negrito, separação estrófica nos poemas, recuos, espaçamentos entre parágrafos. Se o MinerU perdeu, repor com markdown (`*itálico*`, `**negrito**`, linha em branco entre estrofes/parágrafos).
   3. **Números sobrescritos** que marcam notas de rodapé (`palavra²`, `cútis⁸`). O OCR frequentemente entrega `palavra2`, `cutisº`, `cútis8`. Confirmar o número exacto contra o PDF e converter para o caractere sobrescrito Unicode (`²³⁴⁵⁶⁷⁸⁹`). **Nunca deduzir o número** — se o PDF não permite ver com certeza, marcar `[VERIFICAR]` e parar.
   4. **Legendas e rodapé/notas** — o bloco "NOTAS" (ou equivalente) que define os termos marcados. Confirmar (a) numeração das notas bate com os sobrescritos no texto, (b) o texto da definição é transcrito literalmente do PDF, sem reescrever. Reportar incoerências em vez de "corrigir" silenciosamente.
 - **Verificação obrigatória de números de linha** — gate duro no `validate`:
   1. Para cada `context_stem`, chamar `get_context_stem_pdf_pages(workspace, id_item)` — devolve o PDF, o intervalo de páginas provável e o excerto actual de `prova.md`.
-  2. Abrir o PDF nessas páginas com `Read(file_path=<pdf>, pages=...)` e contar visualmente os marcadores de linha na margem do excerto.
+  2. Extrair o texto dessas páginas com PyMuPDF via Bash (`/opt/homebrew/bin/python3.11 -c "import fitz; doc=fitz.open('...'); print(doc[N-1].get_text())"`) e contar os marcadores de linha na margem do excerto. **Não usar `Read` em PDFs — está bloqueado por hook.**
   3. Editar o `enunciado` em `questoes_review.json` aplicando o **formato canónico**: cada marcador fica sozinho em início de linha, no padrão `\n{N} {conteúdo da linha N}`. Nunca deixar um número fundido à palavra seguinte, nem inline no meio de uma frase, nem com OCR corrompido (`|0`, `I0`, `l0`, `IO`) — reescrever para o dígito canónico.
   4. Preencher `tem_numeracao_linhas`: `true` se o excerto original no PDF tem marcadores de linha; `false` se não tem (ex.: tema de dissertação do Grupo III, tipicamente sem numeração).
   5. Se `tem_numeracao_linhas: false`, garantir que nenhum dígito espúrio do OCR ficou colado a palavras — limpar antes de prosseguir.

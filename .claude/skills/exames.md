@@ -155,6 +155,11 @@ O `validate` falha alto se: `tem_numeracao_linhas` for `null`, `linhas_verificad
 - Reticências: `...` → `…` (um único caractere).
 - Itálicos aparecem em títulos de obras e estrangeirismos — preservar `*palavra*` ou `_palavra_` conforme o OCR os produziu.
 
+**Lacunas intencionais do enunciado (NÃO REMOVER):**
+- Itens de completar (`complete_table`, frases-lacuna do GRUPO II) têm espaços sublinhados ou traços longos que marcam o lugar onde o aluno preenche.
+- O OCR pode transcrever como `_____`, `\_\_\_\_`, `——`, `———`, ou apenas alguns underscores. **Manter** — só normalizar para uma forma canónica (ex.: `_____` com 5 underscores) sem suprimir.
+- **Nunca** apagar a lacuna achando que é ruído OCR. A frase «O discurso camoniano é rico em recursos expressivos. Por exemplo, no verso 31, está presente uma _____ que realça as ideias _____.» tem **duas lacunas obrigatórias** — removê-las altera o exame.
+
 ### 3.4 Padrões recorrentes de OCR — GRUPO I / GRUPO II
 
 **Prefixos de item ausentes:**
