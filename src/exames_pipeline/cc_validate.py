@@ -90,6 +90,41 @@ def _check_token_diff(c: CriterioRaw) -> list[str]:
     ]
 
 
+def _check_solucao_mirrored(c: CriterioRaw) -> list[str]:
+    """Erro se `solucao` substancial não estiver espelhada em criterios_parciais.
+
+    Contrato (AGENTS.md §6b.0.1, .claude/skills/exames.md): para open_response
+    e essay, o texto da resolução completa deve aparecer em pelo menos um
+    criterios_parciais[].descricao — o preview e o Supabase mostram os dois
+    campos por caminhos distintos, e deixar criterios_parciais só com o
+    descritor C-ED esconde a resposta esperada do classificador humano.
+
+    Aplica apenas a tipos open_response/essay com solucao não-trivial
+    (≥80 chars após strip). MC, complete_table e multi_select têm solucao
+    curta tipo "Opção (A)" — espelhar não acrescenta valor.
+    """
+    if c.tipo not in {"open_response", "essay"}:
+        return []
+    solucao = (c.solucao or "").strip()
+    if len(solucao) < 80:
+        return []
+    if not c.criterios_parciais:
+        return []  # já apanhado por outro check
+
+    def _norm(s: str) -> str:
+        return re.sub(r"\s+", " ", s or "").strip().lower()
+
+    needle = _norm(solucao)
+    haystack = " ".join(_norm(step.get("descricao", "")) for step in c.criterios_parciais)
+    if needle in haystack:
+        return []
+    return [
+        "solucao não espelhada em criterios_parciais — copiar o texto da "
+        "resolução completa para a 'descricao' do critério de pontuação máxima "
+        "(ver AGENTS.md §6b.0.1)."
+    ]
+
+
 def _validate_criterio(c: CriterioRaw) -> tuple[list[str], list[str]]:
     """
     Retorna (erros, avisos) para um critério.
@@ -152,6 +187,7 @@ def _validate_criterio(c: CriterioRaw) -> tuple[list[str], list[str]]:
                 erros.append("criterios_parciais vazio — nenhuma etapa ou nível extraído")
 
         avisos.extend(_check_token_diff(c))
+        erros.extend(_check_solucao_mirrored(c))
 
     return erros, avisos
 
