@@ -129,6 +129,7 @@ Fluxo obrigatório, para cada `context_stem` (`I-ctx1`, `I-ctx2`, `II-ctx1`, `II
    10 texto que começa na linha 10…
    ```
    - Cada marcador sozinho em início de linha, seguido de **um espaço** e do conteúdo daquela linha.
+   - ⚠️ **Apenas os múltiplos de 5 que estão impressos na margem do PDF** (`5`, `10`, `15`, `20`, …). **Nunca** numerar linha a linha (`1`, `2`, `3`, …); o IAVE só imprime os marcadores de 5 em 5, e os enunciados das questões citam exactamente esses números (`linha 9` refere-se à 9.ª linha contada a partir do marcador `5`, não a uma linha rotulada `9`). Se houver dúvida, contar: a primeira linha do excerto pode não ter marcador algum.
    - Nunca deixar o número fundido à palavra seguinte (`5calamistrar`), inline no meio de uma frase (`… espetáculo. 15 A cara…` em linha única), nem com OCR corrompido (`|0`, `I0`, `l0`, `IO` → `10`).
    - Não juntar linhas por "fluir melhor", não quebrar linhas para "alinhar" com a numeração.
 5. Decidir `tem_numeracao_linhas`:
