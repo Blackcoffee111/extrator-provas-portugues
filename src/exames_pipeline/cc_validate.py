@@ -90,6 +90,44 @@ def _check_token_diff(c: CriterioRaw) -> list[str]:
     ]
 
 
+def _mirror_complete_table_solucao(criterios: list[CriterioRaw]) -> int:
+    """Espelha `solucao` para o 1.º criterios_parciais em itens complete_table.
+
+    Para complete_table (tab), a `solucao` é a chave de respostas curta
+    (ex: "a) 3; b) 1; c) 2"). O 1.º criterios_parciais deve conter APENAS
+    essa resposta — sem descritor C-ED, sem texto adicional. Diferente
+    de open_response/essay, onde se prepende preservando o descritor.
+
+    Corre no validate (não no extract) porque a solucao do extract é
+    block.text bruto; só após o agente a limpar é que vale a pena espelhar.
+
+    Sem efeito quando:
+      - tipo != complete_table
+      - solucao vazia/whitespace
+      - 1.º criterios_parciais já tem descricao == solucao (idempotente)
+    """
+    n = 0
+    for c in criterios:
+        if c.tipo != "complete_table":
+            continue
+        solucao = (c.solucao or "").strip()
+        if not solucao:
+            continue
+        if c.criterios_parciais:
+            first = c.criterios_parciais[0]
+            if (first.get("descricao") or "").strip() == solucao:
+                continue
+            first["descricao"] = solucao
+            if "pontos" not in first and "nivel" not in first:
+                first["pontos"] = c.cotacao_total
+        else:
+            c.criterios_parciais = [
+                {"pontos": c.cotacao_total, "descricao": solucao}
+            ]
+        n += 1
+    return n
+
+
 def _check_solucao_mirrored(c: CriterioRaw) -> list[str]:
     """Erro se `solucao` substancial não estiver espelhada em criterios_parciais.
 
@@ -201,6 +239,11 @@ def validate_criterios(raw_path: Path) -> tuple[Path, Path]:
     raw_path = raw_path.resolve()
     output_dir = raw_path.parent
     criterios = load_criterios(raw_path)
+
+    n_mirrored = _mirror_complete_table_solucao(criterios)
+    if n_mirrored:
+        print(f"[cc_validate] 🪞 solucao espelhada em criterios_parciais (complete_table): {n_mirrored} item(ns)")
+        dump_criterios(raw_path, criterios)
 
     approved: list[CriterioRaw] = []
     rejected: list[CriterioRaw] = []
