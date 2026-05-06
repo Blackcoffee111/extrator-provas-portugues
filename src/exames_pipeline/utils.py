@@ -10,10 +10,24 @@ import subprocess
 _GRUPO_HEADING_RE = re.compile(
     r"(?m)^#{1,3}\s*[Gg][Rr][Uu][Pp][Oo]\s+(?P<num>I{1,3}|IV|VI{0,3}|IX|X)\b"
 )
-# Detetar cabeçalhos de PARTE (Português): "## PARTE A", "## Parte B", etc.
+# Detetar cabeçalhos de PARTE (Português):
+#   "## PARTE A", "## Parte B", etc.   — convenção MinerU clássica.
+#   "## A", "### B", etc.              — convenção IAVE/Sonnet 4.6 (apenas a
+#       letra, isolada na linha — assume-se inserida dentro de um GRUPO X).
 _PARTE_HEADING_RE = re.compile(
-    r"(?m)^#{1,3}\s*[Pp][Aa][Rr][Tt][Ee]\s+(?P<letra>[A-C])\b"
+    r"(?m)^#{1,3}\s+(?:[Pp][Aa][Rr][Tt][Ee]\s+(?P<letra>[A-C])"
+    r"|(?P<letra_short>[A-C]))\s*$"
 )
+
+
+def _parte_letra(m: "re.Match[str]") -> str:
+    """Extrai a letra de PARTE de um match de _PARTE_HEADING_RE.
+
+    Suporta ambas as variantes do regex: '## PARTE A' e '## A'.
+    """
+    return ((m.group("letra") if "letra" in m.groupdict() else None)
+            or (m.group("letra_short") if "letra_short" in m.groupdict() else None)
+            or "").upper()
 # Notas de rodapé do excerto: "¹ calamistrar – tornar crespo"  ou  "1 calamistrar – ..."
 # Requisitos: (1) traço separador (— ou – ou " - ") entre o termo e a definição;
 # (2) o texto antes do traço tem ≤40 chars e não contém ; : ( ) — exclui linhas de prosa longas
@@ -44,7 +58,10 @@ _ROMANO_CANON = {"I": "I", "II": "II", "III": "III", "IV": "IV", "V": "V",
 
 IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 QUESTION_HEADING_PATTERN = re.compile(
-    r"(?m)^(?:\$\\(?:star|bigstar|ast)\$\s*|\$?\\pm\s*|\\[*]\s*|[\*\u00b1•-]\s*)?(?:Quest[aã]o\s+)?(?P<label>\d{1,3}(?:\.\d{1,2})?)(?:\s*\.\s*\$?\s+|(?=[A-ZÁÉÍÓÚÀÂÃÇ]))"
+    r"(?m)^(?:\$\\(?:star|bigstar|ast)\$\s*|\$?\\pm\s*|\\[*]\s*|[\*\u00b1•-]\s*|\*\*\s*)?"
+    r"(?:Quest[aã]o\s+)?"
+    r"(?P<label>\d{1,3}(?:\.\d{1,2})?)"
+    r"(?:\s*\.\s*(?:\*\*)?\s*\$?\s+|\s*\.\*\*\s+|(?=[A-ZÁÉÍÓÚÀÂÃÇ]))"
 )
 INLINE_SUBHEADING_PATTERN = re.compile(
     r"(?P<prefix>\s|[\*\u2605])(?P<label>\d{1,3}\.\d{1,2})\.\s+"
@@ -362,7 +379,7 @@ def extract_pt_group_contexts(
             grupo_current = _ROMANO_CANON.get(gd["num"].upper(), gd["num"].upper())
             parte_current = ""
         else:
-            parte_current = (gd.get("letra") or "").upper()
+            parte_current = _parte_letra(m)
         all_events.append((m.start(), text_start, grupo_current, parte_current))
 
     if not all_events:
@@ -392,10 +409,14 @@ def extract_pt_group_contexts(
 
 
 def detect_partes(markdown_text: str) -> list[tuple[int, str]]:
-    """Retorna lista de (char_offset, letra_parte) para os cabeçalhos PARTE A/B/C."""
+    """Retorna lista de (char_offset, letra_parte) para os cabeçalhos PARTE A/B/C.
+
+    Aceita 'PARTE A' (MinerU) e a forma reduzida '# A'/'## A' (Sonnet/IAVE).
+    """
     return [
-        (m.start(), m.group("letra").upper())
+        (m.start(), _parte_letra(m))
         for m in _PARTE_HEADING_RE.finditer(markdown_text)
+        if _parte_letra(m)
     ]
 
 

@@ -22,6 +22,14 @@ _ITEM_RE = re.compile(r"^(?:[#*\s]*)?(\d+(?:\.\d+)*)\.?\s+(\d+)\s*pontos?", re.I
 _TABLE_HEADER_RE = re.compile(r"^\|(?:\s*[\d.]+\s*\|)+")
 # Linha de cotação tabular: "| 13 | 13 | 13 | 13 | 13 |"
 _TABLE_SCORES_RE = re.compile(r"^\|(?:\s*\d+\s*\|)+")
+# Cabeçalho da tabela 3-col "Grupo | Item | Cotação" (Sonnet 4.6 / IAVE moderno)
+_TABLE_GIC_HEADER_RE = re.compile(
+    r"^\|\s*Grupo\s*\|\s*Item\s*\|\s*Cota[çc][aã]o[^|]*\|", re.IGNORECASE
+)
+# Roman numeral isolado numa célula: "I", "II", "III", "IV"
+_ROMAN_ONLY_RE = re.compile(r"^\*{0,2}([IVX]+)\*{0,2}$")
+# Letra de PARTE isolada numa célula: "A", "B", "C"
+_PARTE_ONLY_RE = re.compile(r"^\*{0,2}([A-C])\*{0,2}$")
 # Linha de pool opcional: "Destes 5 itens, contribuem para a classificação ... os 3 itens"
 _POOL_OPCIONAL_RE = re.compile(
     r"(?:Destes|dos restantes)\s+(\d+)\s+itens.*?contribuem.*?os\s+(\d+)\s+itens",
@@ -117,6 +125,76 @@ def _parse_cotacoes_from_text(after_heading: str) -> EstruturaCotacoes | None:
         p = _PARTE_RE.search(line)
         if p and "PARTE" in line.upper():
             current_parte = p.group(1).upper()
+            continue
+
+        # Tabela MD 3 colunas "Grupo | Item | Cotação" (Sonnet 4.6 / IAVE moderno)
+        if _TABLE_GIC_HEADER_RE.match(line):
+            # Pular linha separadora "| --- | --- | --- |"
+            while i < len(lines) and not lines[i].strip():
+                i += 1
+            if i < len(lines) and re.match(r"^\|[-|\s:]+\|", lines[i].strip()):
+                i += 1
+            # Iterar linhas-de-tabela até linha não-pipe
+            while i < len(lines):
+                row = lines[i].strip()
+                if not row.startswith("|"):
+                    break
+                i += 1
+                cells = [c.strip() for c in row.split("|")[1:-1]]
+                if len(cells) < 3:
+                    continue
+                # Linha TOTAL — ignorar
+                if "total" in cells[0].lower() or "**total**" in cells[0].lower():
+                    continue
+                # Coluna 1: GRUPO (romano) ou PARTE (letra)
+                gm = _ROMAN_ONLY_RE.match(cells[0])
+                pm = _PARTE_ONLY_RE.match(cells[0])
+                if gm:
+                    current_group = gm.group(1).upper()
+                    current_parte = ""
+                elif pm:
+                    current_parte = pm.group(1).upper()
+                else:
+                    # Outra forma — tentar GRUPO/PARTE genérico
+                    g_inline = _GROUP_RE.search(cells[0])
+                    p_inline = _PARTE_RE.search(cells[0])
+                    if g_inline:
+                        current_group = g_inline.group(1).upper()
+                        current_parte = ""
+                    if p_inline:
+                        current_parte = p_inline.group(1).upper()
+                # Coluna 2: range "1. a 5. (5 × 20 pontos)" ou item único
+                col2 = cells[1]
+                col3 = cells[2]
+                # Total da célula 3 (fallback) — limpar negrito/tab
+                total_pts: int | None = None
+                m_pts = re.search(r"(\d+)", col3.replace("**", ""))
+                if m_pts:
+                    total_pts = int(m_pts.group(1))
+                # Range: "1. a 5. (5 × 20 pontos)"
+                rng = _RANGE_RE.match(col2)
+                if rng:
+                    start, end = int(rng.group(1)), int(rng.group(2))
+                    t = _TIMES_RE.search(col2)
+                    if t:
+                        per_item = int(t.group(2))
+                    elif total_pts is not None:
+                        count = end - start + 1
+                        per_item = total_pts // count if count else 0
+                    else:
+                        per_item = 0
+                    for j in range(start, end + 1):
+                        add_item(make_id(str(j)), per_item)
+                    continue
+                # Item único: "1." ou "Item único" → cota = total da célula 3
+                item_m = re.match(r"^\s*(\d+(?:\.\d+)?)\.?\s*$", col2)
+                if item_m and total_pts is not None:
+                    add_item(make_id(item_m.group(1)), total_pts)
+                    continue
+                # "Item único" sem número → assumir id "1"
+                if "item" in col2.lower() and total_pts is not None:
+                    add_item(make_id("1"), total_pts)
+                    continue
             continue
 
         # Tabela MD de cabeçalho de itens: "| 1. | 2. | 4. | 5. | 7. |"

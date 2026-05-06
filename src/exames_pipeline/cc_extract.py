@@ -28,7 +28,7 @@ from .utils import infer_fonte_from_path
 _CRITERIOS_ESPECIFICOS_RE = re.compile(
     r'(?i)CRIT[ÉE]RIOS\s+ESPEC[ÍI]FICOS\s+DE\s+CLASSIFICA[ÇC][ÃA]O'
 )
-_FIRST_ITEM_RE = re.compile(r'(?m)^#{0,4}\s*1\.[ \t]+\d+\s*pontos')
+_FIRST_ITEM_RE = re.compile(r'(?m)^#{0,4}\s*(?:\*\*)?\s*1\.(?:\*\*)?[ \t]+\d+\s*pontos')
 _COTACOES_TRUNCATE_RE = re.compile(r'(?m)^#{0,4}\s*COTA[ÇC][ÕO]ES\b', re.IGNORECASE)
 # Heading de grupo no markdown CC: "# GRUPO I", "## GRUPO II", etc.
 _GROUP_HEADING_RE = re.compile(r'(?m)^#{1,4}\s*GRUPO\s+([IVX]+)\b', re.IGNORECASE)
@@ -40,17 +40,20 @@ _GROUP_HEADING_RE = re.compile(r'(?m)^#{1,4}\s*GRUPO\s+([IVX]+)\b', re.IGNORECAS
 #   "4.1. 14 pontos"             →  subitem
 #   "5.1. . 14 pontos"           →  ponto extra entre ID e cotação (OCR 2024)
 #   "4. Chave: (D) 13 pontos"    →  PT EE-2022: gabarito MC inline antes da cotação
+# E também o markdown produzido pelo Sonnet 4.6:
+#   "**1.** 20 pontos"           →  número em negrito
+#   "**1. 20 pontos**"           →  cabeçalho inteiro em negrito
 # Permite até ~40 chars entre o ID e "N pontos" para tolerar "Chave: (X)" e
 # variantes inline; não-greedy e sem newline para não atravessar linhas.
 _ITEM_HEADER_RE = re.compile(
-    r'(?m)^#{0,4}\s*(\d{1,2}(?:\.\d+)?)\.(?:[ \t]*\.)?[ \t]+(?:[^\n]{0,40}?[ \t]+)?(\d+)\s*pontos'
+    r'(?m)^#{0,4}\s*(?:\*\*)?\s*(\d{1,2}(?:\.\d+)?)\.(?:\*\*)?(?:[ \t]*\.)?[ \t]+(?:[^\n]{0,40}?[ \t]+)?(\d+)\s*pontos'
 )
 
 # Deteção secundária: linha com ID seguido de texto (pontos não são imediatos).
 # Ex: "3.1. Concluir que o raio é 1 2 pontos Escrever a condição..."
 # O ID é capturado; a cotação total é inferida das cotações quando disponível.
 _ITEM_HEADER_INLINE_RE = re.compile(
-    r'(?m)^#{0,4}\s*(\d{1,2}(?:\.\d+)?)\.\s+[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ]'
+    r'(?m)^#{0,4}\s*(?:\*\*)?\s*(\d{1,2}(?:\.\d+)?)\.(?:\*\*)?\s+[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ]'
 )
 _IMPLICIT_POINTS_HEADER_RE = re.compile(r'(?m)^#{0,4}\s*(\d+)\s*pontos\s*$')
 
@@ -298,24 +301,40 @@ _REVIEW_EXCLUDED = {"texto_original", "imagens", "fonte"}
 def _mirror_solucao_into_criterios(criterios: list[CriterioRaw]) -> int:
     """Prepende `solucao` à descricao do 1.º criterios_parciais (open_response/essay).
 
-    Contrato (AGENTS.md §6b.0.1): preview e Supabase mostram solucao e
-    criterios_parciais por caminhos distintos; deixar criterios_parciais só
-    com o descritor C-ED esconde a resposta esperada do classificador.
-    Em vez de pedir ao agente para copiar manualmente, fazemos isso
-    automaticamente após a extração.
+    Contrato (AGENTS.md): preview e Supabase mostram solucao e criterios_parciais
+    por caminhos distintos; deixar criterios_parciais vazio esconde a resposta
+    esperada do classificador. Em vez de pedir ao agente para copiar
+    manualmente, fazemos isso automaticamente após a extração.
+
+    Comportamento:
+      - Se criterios_parciais já existe: prepende solucao ao 1.º item.
+      - Se criterios_parciais está vazio (e há solucao): CRIA um item único
+        com `descricao = solucao` e `pontos = cotacao_total`. Isto cobre o
+        caso comum em que ignorámos a tabela de descritores C-ED — o pipeline
+        não captura níveis intermédios e basta um critério único com a
+        resposta esperada e a pontuação total.
 
     Sem efeito quando:
       - tipo ∉ {open_response, essay}
       - solucao vazia/whitespace
-      - criterios_parciais vazio
-      - solucao já presente na descricao do 1.º critério (idempotente)
+      - solucao já presente no início da descricao do 1.º critério (idempotente)
     """
     n = 0
     for c in criterios:
         if c.tipo not in {"open_response", "essay"}:
             continue
         solucao = (c.solucao or "").strip()
-        if not solucao or not c.criterios_parciais:
+        if not solucao:
+            continue
+        if not c.criterios_parciais:
+            c.criterios_parciais = [{
+                "nivel": "",
+                "pontos": int(c.cotacao_total or 0),
+                "descricao": solucao,
+            }]
+            if c.status == "pending_review":
+                c.status = "draft"
+            n += 1
             continue
         first = c.criterios_parciais[0]
         descricao = (first.get("descricao") or "").strip()
@@ -373,6 +392,120 @@ def _find_criterios_especificos(markdown: str) -> str:
         cut = _COTACOES_TRUNCATE_RE.search(body)
         return body[:cut.start()].strip() if cut else body
     return markdown
+
+
+# ── Pré-processamento: tabelas de chave de respostas (Sonnet 4.6) ──────────────
+#
+# O Sonnet 4.6 transcreve a tabela de gabarito de escolha múltipla como:
+#
+#     | Item | Versão 1 | Versão 2 | Pontuação |
+#     |------|----------|----------|-----------|
+#     | 1.   | C        | A        | 5 pontos  |
+#     | 2.   | A        | C        | 5 pontos  |
+#
+# O parser principal não reconhece este formato. Esta função expande a tabela
+# em linhas individuais "N. Chave: (X) M pontos" que o _ITEM_HEADER_RE existente
+# já consegue parsear.
+
+_CHAVE_TABLE_HEADER_RE = re.compile(
+    r"^\|\s*Item\s*\|.*?(?:Vers[aã]o|Chave)[^|]*\|.*?(?:Pontua[çc][aã]o|Cota[çc][aã]o|pontos)[^|]*\|",
+    re.IGNORECASE,
+)
+# Linha qualquer que faça parte de uma tabela markdown (começa com "|")
+_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+
+
+def _strip_residual_tables(text: str) -> str:
+    """Remove tabelas markdown remanescentes do CC.
+
+    Aplicado APÓS `_expand_chave_tables`, pelo que a tabela de chave de
+    respostas MC já foi convertida em linhas item-a-item e desapareceu como
+    bloco tabular. Tudo o que sobra como tabela markdown é descritor C-ED,
+    CL ou outro ruído que não queremos transcrever — ignora-se.
+
+    Estratégia: detectar runs contíguos de linhas começadas por '|' e
+    substituir por uma linha em branco. Conserva todo o texto não-tabular.
+    """
+    lines = text.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if _TABLE_ROW_RE.match(lines[i]):
+            # Avançar enquanto for linha de tabela (ou linha em branco entre
+            # blocos de tabela, conservadoramente não — apenas linhas |…|).
+            while i < len(lines) and _TABLE_ROW_RE.match(lines[i]):
+                i += 1
+            out.append("")  # marcar fronteira para o parser
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+def _expand_chave_tables(text: str) -> str:
+    """Expande tabelas markdown de chave de respostas em linhas item-a-item.
+
+    Aceita tabelas com cabeçalho 'Item | Versão N ... | Pontuação' (Sonnet 4.6)
+    e produz `N. Chave: (X) M pontos` para cada linha. Usa apenas a 1.ª coluna
+    de chave (Versão 1, ou única coluna 'Chave' quando só há uma versão).
+    """
+    lines = text.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if _CHAVE_TABLE_HEADER_RE.match(line.strip()):
+            # Localizar índice da 1.ª coluna de chave + coluna de pontos
+            header_cells = [c.strip().lower() for c in line.strip().split("|")[1:-1]]
+            try:
+                idx_chave = next(
+                    j for j, c in enumerate(header_cells)
+                    if "vers" in c or c == "chave" or c.startswith("chave")
+                )
+                idx_pts = next(
+                    j for j, c in enumerate(header_cells)
+                    if "pontua" in c or "cota" in c or "pontos" in c
+                )
+            except StopIteration:
+                out.append(line)
+                i += 1
+                continue
+            # Pular separador
+            i += 1
+            if i < len(lines) and re.match(r"^\|[-|\s:]+\|", lines[i].strip()):
+                i += 1
+            expanded: list[str] = []
+            while i < len(lines):
+                row = lines[i].strip()
+                if not row.startswith("|"):
+                    break
+                cells = [c.strip() for c in row.split("|")[1:-1]]
+                if len(cells) <= max(idx_chave, idx_pts):
+                    i += 1
+                    continue
+                item_cell = cells[0].rstrip(".").strip()
+                chave_cell = cells[idx_chave].strip().strip("()")
+                pts_cell = cells[idx_pts]
+                m_pts = re.search(r"(\d+)", pts_cell)
+                if (
+                    re.match(r"^\d+(?:\.\d+)?$", item_cell)
+                    and re.match(r"^[A-D]$", chave_cell, re.IGNORECASE)
+                    and m_pts
+                ):
+                    expanded.append(
+                        f"{item_cell}. Chave: ({chave_cell.upper()}) {m_pts.group(1)} pontos"
+                    )
+                i += 1
+            if expanded:
+                out.append("")
+                out.extend(expanded)
+                out.append("")
+            else:
+                out.append(line)
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
 
 
 def _segment_blocks(
@@ -561,6 +694,13 @@ def extract_cc(
 
     markdown = markdown_path.read_text(encoding="utf-8")
     text = _find_criterios_especificos(markdown)
+    # Expandir tabelas de chave de respostas (formato Sonnet 4.6) em linhas
+    # item-a-item que o parser de cabeçalhos já reconhece.
+    text = _expand_chave_tables(text)
+    # Filtro defensivo: remover quaisquer tabelas markdown remanescentes
+    # (descritores C-ED, CL, etc.). Só a tabela de chave MC é relevante e
+    # essa já foi convertida em linhas pelo passo anterior.
+    text = _strip_residual_tables(text)
 
     # Carregar cotações esperadas antes de segmentar (usadas na 2.ª passagem)
     cotacoes_path = output_dir / "cotacoes_estrutura.json"

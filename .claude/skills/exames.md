@@ -31,7 +31,89 @@ Usar `workspace_status(workspace)` sempre que em dúvida sobre o estado de um wo
 
 ---
 
-## 2. Executar MinerU (fora do sandbox)
+## 2. Extracção do PDF — **Sonnet 4.6 por defeito**, MinerU como alternativa
+
+A extracção tem dois caminhos. Por defeito **usar Sonnet** (preserva diacríticos, itálicos, sobrescritos e tabelas mais fielmente, sem dependência do `.venv-mineru`). Cair em MinerU apenas se o utilizador pedir explicitamente, ou se Sonnet falhar (PDF sem camada de texto, etc.).
+
+### 2a. Caminho default — Sonnet 4.6 página-a-página
+
+Os parsers (`module_structure`, `module_cotacoes`, `cc_extract`) aceitam o markdown que o Sonnet produz naturalmente — `**N.**`, `## A`, tabela 3-col `Grupo|Item|Cotação`, tabela `Item|Versão N|Pontuação`. **Não reformatar para o estilo MinerU.**
+
+**Passo 1 — Triagem das páginas úteis:**
+
+```bash
+cd "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues"
+PYTHONPATH="src" /opt/homebrew/bin/python3.11 -m exames_pipeline.cli triage \
+  "provas fonte/PROVA.pdf" --workspace EX-Port639-XX-YYYY_net
+```
+
+Cria `workspace/<NOME>/pages_manifest.json` com `pages_to_process` (intervalo útil) + `contact_sheet.png` (visualização). Para CC-VD, usar o mesmo comando — `--kind` é auto-detectado pelo nome do ficheiro.
+
+**Passo 2 — Renderizar PNG + texto PyMuPDF:**
+
+```bash
+PYTHONPATH="src" /opt/homebrew/bin/python3.11 -m exames_pipeline.cli prepare-pages \
+  "provas fonte/PROVA.pdf" --workspace EX-Port639-XX-YYYY_net
+```
+
+Produz `workspace/<NOME>/pages/page_NNN.png` + `page_NNN.txt` para cada página marcada para processar.
+
+**Passo 3 — Sub-agente Sonnet 4.6 lê e transcreve:**
+
+Lançar um sub-agente com `Agent(subagent_type="general-purpose", model="sonnet")`. Prompt mínimo (auto-contido — o sub-agente não vê esta conversa):
+
+```
+Tarefa: produzir workspace/<NOME>/prova.md a partir das páginas em
+workspace/<NOME>/pages/ (PNG + .txt PyMuPDF). Concatenar todas as páginas
+em ordem, mantendo a fidelidade tipográfica do PDF.
+
+Regras de transcrição:
+1. Markdown natural: # GRUPO I, ## A, **1.**, **2.1.**, tabelas com pipes.
+2. Tipografia PT obrigatória: «», …, diacríticos correctos, sobrescritos
+   Unicode (¹²³…) para chamadas de nota.
+3. Excerto literário: marcar números de linha apenas nos múltiplos de 5
+   que aparecem na margem do PDF. Cada marcador no início da sua linha:
+   "5 texto da linha 5".
+4. NOTAS: transcrever literalmente; nunca deduzir ou completar.
+5. COTAÇÕES: copiar a tabela como tabela markdown 3-col
+   (Grupo | Item | Cotação).
+6. Imagens/figuras: substituir por descrição entre [colchetes] se essenciais
+   à compreensão; ignorar logos e decoração.
+7. Lacunas que o aluno preenche (_____, ——) preservar exactamente.
+
+Não reformatar para "estilo MinerU". O pipeline aceita este formato directamente.
+```
+
+Para o CC-VD, prompt diferente:
+
+```
+Tarefa: produzir workspace/<NOME>-CC-VD_net/prova.md a partir de
+workspace/<NOME>-CC-VD_net/pages/.
+
+Regras CC-VD:
+1. Começar com a linha "# CRITÉRIOS ESPECÍFICOS DE CLASSIFICAÇÃO" (âncora
+   obrigatória — o extractor corta nela).
+2. Para cada item de resposta extensa (open_response, essay): transcrever
+   apenas o cabeçalho "**N.** N pontos" e o texto da "Resolução completa"
+   (ou rótulo equivalente) que indica a resposta esperada.
+3. **Ignorar** todas as tabelas de descritores (Níveis 5/4/3/2/1, "C-ED"),
+   tabela CL ("Aspectos de correção linguística") e quaisquer outras tabelas
+   genéricas. Não transcrever os níveis intermédios.
+4. **Transcrever apenas** a tabela de chave de respostas de escolha múltipla,
+   no formato `| Item | Versão 1 | Versão 2 | Pontuação |`. O pipeline expande
+   automaticamente em linhas item-a-item.
+5. Tipografia PT idem caminho da prova principal.
+```
+
+**Passo 4 — `run_stage(extract)` lê o markdown directamente:**
+
+```
+run_stage(workspace="EX-Port639-XX-YYYY_net", stage="extract")
+```
+
+Sem `pdf_path` — o pipeline detecta o `prova.md` existente e estrutura sem invocar MinerU. Se `cotacoes_estrutura.json` não for criado automaticamente, o output explica como completar manualmente.
+
+### 2b. Alternativa — MinerU (quando Sonnet não serve)
 
 > ⚠️ MinerU falha em ambientes sandbox (multiprocessing bloqueado). Pedir ao utilizador para correr no Terminal:
 
@@ -39,23 +121,24 @@ Usar `workspace_status(workspace)` sempre que em dúvida sobre o estado de um wo
 cd "/Users/adrianoushinohama/dev/Exames Nacionais/Provas de portugues"
 MINERU="/Users/adrianoushinohama/dev/Exames Nacionais/Provas de matemática/.venv-mineru/bin/mineru"
 "$MINERU" -b pipeline -p "provas fonte/PROVA.pdf" -o "workspace/NOME"
-# Localizar e copiar o .md gerado:
 find workspace/NOME -name "*.md" | head -1
 cp <caminho_encontrado> workspace/NOME/prova.md
 cp -r workspace/NOME/NOME/pipeline/images/ workspace/NOME/images/
 ```
 
-Após o utilizador confirmar que o MinerU terminou, chamar:
+Depois `run_stage(workspace="NOME", stage="extract")`. Os mesmos parsers actuam — MinerU produz `# GRUPO`, `## PARTE A`, `1.`, etc., todos retro-compatíveis.
 
-```
-run_stage(workspace="NOME", stage="extract")
-```
+### Reverter para MinerU como default
 
-> Se `pdf_path` for fornecido, `run_stage(stage='extract')` tenta correr MinerU internamente.  
-> Se `prova.md` já existir no workspace (MinerU manual), re-estrutura sem re-correr OCR.
+Para voltar ao fluxo MinerU-first, basta uma de duas acções:
+- `git revert <commit-da-pivot>` no worktree, ou
+- Editar esta secção 2 trocando 2a ↔ 2b (mudar título "Sonnet 4.6 por defeito" para "Alternativa", e vice-versa).
 
-Verificar e corrigir `cotacoes_estrutura.json` antes de avançar:
-- ✅ Correto: `"I-1"`, `"II-2.1"` (prefixo de grupo incluído)
+O código do pipeline aceita ambos os formatos indefinidamente — só esta skill define qual é o default.
+
+### Verificar `cotacoes_estrutura.json` antes de avançar
+
+- ✅ Correcto: `"I-1"`, `"II-2.1"` (prefixo de grupo incluído)
 - ❌ Errado: `"I"`, `"II"` como chaves pai — corrigir com `Edit` antes de `run_stage(stage='validate')`
 
 ---
@@ -368,7 +451,13 @@ Internamente corre micro-lint e depois a validação heurística. Se houver erro
 
 ## 6. Critérios CC-VD (se aplicável)
 
-### 6a. MinerU no CC-VD (fora do sandbox)
+### 6a. Extracção do CC-VD — Sonnet (default) ou MinerU
+
+Mesmo princípio da secção 2: usar Sonnet por defeito; MinerU só se Sonnet falhar ou o utilizador pedir.
+
+**Default — Sonnet:** correr `triage` + `prepare-pages` no PDF do CC-VD (workspace `<NOME>-CC-VD_net`), depois sub-agente Sonnet 4.6 com o **prompt do CC-VD** mostrado na secção 2a (regra: ignorar tabelas de descritores, transcrever só a chave MC).
+
+**Alternativa — MinerU:**
 
 ```bash
 MINERU="/Users/adrianoushinohama/dev/Exames Nacionais/Provas de matemática/.venv-mineru/bin/mineru"
@@ -378,57 +467,57 @@ MINERU="/Users/adrianoushinohama/dev/Exames Nacionais/Provas de matemática/.ven
 cp <caminho_encontrado> workspace/NOME-CC-VD/prova.md
 ```
 
-Depois (1ª chamada — extrai critérios):
+Em qualquer dos casos, depois (1ª chamada — extrai critérios):
 ```
 run_stage(workspace="NOME", stage="cc", workspace_cc="NOME-CC-VD")
 ```
+
+O `cc_extract` aplica o filtro `_strip_residual_tables` automaticamente, removendo tabelas de descritores se ainda restarem do markdown. Mesmo com MinerU as regras são as mesmas — só a chave MC fica.
 
 ### 6b. Revisão de criterios_raw.json
 
 `criterios_raw.json` tem itens com `"reviewed": false`. Para cada item:
 1. Verificar: `solucao`, `criterios_parciais`, `resposta_correta` (MC), `resolucoes_alternativas`
-2. Para MC com `resposta_correta` vazia: **ler `workspace/NOME-CC-VD_net/prova.md`** (output do MinerU) e procurar a tabela "CHAVE DE RESPOSTA" do GRUPO II (ou equivalente). O MinerU transcreve a tabela como markdown — copiar a letra de lá. **Não ler o PDF**: o markdown é a fonte de verdade.
+2. Para MC com `resposta_correta` vazia: **ler `workspace/NOME-CC-VD_net/prova.md`** (transcrito por Sonnet ou MinerU) e procurar a tabela "CHAVE DE RESPOSTA" do GRUPO II (ou equivalente). A letra está no markdown — copiar de lá. **Não ler o PDF**: o markdown é a fonte de verdade.
 3. Para itens de resposta aberta com 0 etapas: extrair do `bloco_ocr` ou do `prova.md` do workspace CC. **Não ler o PDF** salvo último recurso.
 4. Corrigir diretamente em `criterios_raw.json`
 5. Setar `"reviewed": true`
 
 **Não categorizar** no fluxo CC-VD.
 
-#### 6b.0 O que NÃO copiar / o que copiar via PyMuPDF
+#### 6b.0 Tabelas no CC — só a chave MC
 
-**Ignorar sempre** (genérico, igual em todos os anos):
-- **Critérios Gerais de Classificação** — preâmbulo nas primeiras ~3 páginas. O extractor já corta na âncora `# CRITÉRIOS ESPECÍFICOS DE CLASSIFICAÇÃO`.
-- **Tabela CL ("Aspectos de correção linguística")** — grelha 3 pontos tipo A/B. Modelada via `parametros_classificacao`.
+**Regra única:** no CC-VD de Português só uma tabela é transcrita — a **chave de respostas de escolha múltipla** (`Item | Versão 1 | Versão 2 | Pontuação`). Todas as outras tabelas são ignoradas.
 
-**Capturar apenas o descritor do nível máximo via PyMuPDF**:
-- **Tabela C-ED ("Aspectos de conteúdo e de estruturação do discurso")** — descritores são específicos de cada questão. Capturar **só o Nível 5** (ou o de pontuação máxima — coincide com o valor da bullet "C-ED ............ N pontos"). Os níveis 4–1 são derivados — não copiar.
+| Tabela | O que fazer |
+|--------|-------------|
+| **Chave de respostas MC** | Transcrever (Sonnet copia tal qual). O `cc_extract` expande automaticamente em linhas `N. Chave: (X) M pontos`. |
+| **Critérios Gerais** (3 páginas iniciais) | Ignorar — extractor corta na âncora `# CRITÉRIOS ESPECÍFICOS DE CLASSIFICAÇÃO`. |
+| **Tabela CL** ("Aspectos de correção linguística") | Ignorar — genérica, já coberta por `parametros_classificacao`. |
+| **Tabela C-ED** ("Aspectos de conteúdo e de estruturação do discurso", Níveis 5/4/3/2/1) | **Ignorar inteiramente.** Não capturar nem o descritor N5 — basta o texto da resolução completa. |
+| Qualquer outra tabela | Ignorar. |
 
-O MinerU pode degradar a estrutura tabular. Ler directamente do PDF com `fitz`:
+**Para itens de resposta extensa (`open_response`, `essay`):** capturar apenas o texto da **"Resolução completa"** (ou rótulo equivalente que precede a resposta sugerida). Vai para `solucao`. Nada de PyMuPDF, nada de descritores.
 
-```python
-import fitz
-doc = fitz.open("provas fonte/.../EX-Port639-...-CC.pdf")
-page = doc[N - 1]   # N = página da tabela C-ED da questão (1-indexed → 0-indexed)
-text = page.get_text()
-# Localizar o bloco entre "Níveis" e a linha "4" (ou "OU") — é o Nível 5
-```
+**Defesa em código:** mesmo que uma tabela de descritor escape para o `prova.md`, o `_strip_residual_tables` em `cc_extract.py` remove-a antes do parse. Tabelas que não sejam chave MC desaparecem silenciosamente.
 
-Colocar o texto num único `criterios_parciais` da questão essay com `pontos` = pontuação máxima da bullet (ex.: 10).
+#### 6b.0.1 `criterios_parciais` é gerado automaticamente
 
-**Regra geral:** se um descritor é igual em provas de anos diferentes (CL, níveis 4–1 da C-ED), é genérico → não copiar. Específico = só o Nível 5 da C-ED.
+Não é preciso copiar manualmente o `solucao` para `criterios_parciais`. O `_mirror_solucao_into_criterios` em `cc_extract.py` faz isso após a extracção:
 
-#### 6b.0.1 Espelhar `solucao` em `criterios_parciais`
+- Se `criterios_parciais` está vazio (caso comum — ignorámos a tabela de níveis): cria `[{"nivel": "", "pontos": <cotacao_total>, "descricao": <solucao>}]` e sobe status de `pending_review` para `draft`.
+- Se já existe entrada (parser detectou steps explícitos no texto): prepende `solucao` à `descricao` do 1.º item.
 
-Para `open_response` e `essay`: depois de preencher `solucao` com a resolução completa, copiar o mesmo texto para `criterios_parciais` (descrição do nível máximo). O preview e o Supabase apresentam-nos por caminhos distintos; deixar `criterios_parciais` só com o descritor C-ED esconde a resposta esperada do classificador humano.
+Forma final de um item open_response/essay:
 
 ```json
-"solucao": "<resolução completa>",
+"solucao": "<texto integral da resolução completa>",
 "criterios_parciais": [
-  {"nivel": "5", "pontos": 10, "descricao": "<descritor C-ED N5> + <resolução completa>"}
+  {"nivel": "", "pontos": <cotação total>, "descricao": "<texto integral da resolução completa>"}
 ]
 ```
 
-Não aplicar a MC (`solucao` trivial = letra correcta).
+Para MC: `solucao` fica vazio (a resposta está em `resposta_correta`).
 
 #### 6b.1 Match critério ↔ questão — obrigatório
 
