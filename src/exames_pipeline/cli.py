@@ -164,6 +164,46 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Incluir apenas os itens fundidos e ignorar pendentes (sem critério/mismatch/contaminação).",
     )
 
+    prepare_pages_parser = subparsers.add_parser(
+        "prepare-pages",
+        help="Renderiza PNG + texto PyMuPDF para cada página em pages_to_process.",
+    )
+    prepare_pages_parser.add_argument("pdf_path", type=Path)
+    prepare_pages_parser.add_argument(
+        "--workspace", type=str, default=None,
+        help="Nome do workspace. Default: stem do PDF.",
+    )
+    prepare_pages_parser.add_argument(
+        "--dpi", type=int, default=200,
+        help="DPI das páginas (default: 200).",
+    )
+    prepare_pages_parser.add_argument(
+        "--pages", type=str, default=None,
+        help="Lista explícita de páginas (ex: '2,3,4'). Se omitido, lê do manifesto.",
+    )
+
+    triage_parser = subparsers.add_parser(
+        "triage",
+        help="Triagem de páginas: identifica intervalo útil + gera contact sheet.",
+    )
+    triage_parser.add_argument("pdf_path", type=Path)
+    triage_parser.add_argument(
+        "--workspace", type=str, default=None,
+        help="Nome do workspace. Default: stem do PDF.",
+    )
+    triage_parser.add_argument(
+        "--kind", choices=["auto", "cc", "prova"], default="auto",
+        help="Tipo do PDF (auto detecta via nome).",
+    )
+    triage_parser.add_argument(
+        "--no-contact-sheet", action="store_true",
+        help="Não gerar contact sheet visual.",
+    )
+    triage_parser.add_argument(
+        "--dpi", type=int, default=80,
+        help="DPI das thumbnails do contact sheet.",
+    )
+
     reextract_parser = subparsers.add_parser(
         "reextract-images",
         help="Recorta imagens do PDF original (sem pré-processamento) usando bboxes do MinerU.",
@@ -355,6 +395,53 @@ def main() -> None:
     if args.command == "cc-merge":
         output = merge_cc(args.criterios_aprovados_path, args.questoes_aprovadas_path, force=args.force)
         print(output)
+        return
+
+    if args.command == "prepare-pages":
+        from .module_triage import prepare_pages  # noqa: PLC0415
+        pdf_path = args.pdf_path.resolve()
+        ws_name = args.workspace or pdf_path.stem
+        workspace_dir = settings.workdir / ws_name
+        pages = None
+        if args.pages:
+            pages = [int(p) for p in args.pages.split(",") if p.strip()]
+        meta = prepare_pages(pdf_path, workspace_dir, pages=pages, dpi=args.dpi)
+        print(f"📄 {pdf_path.name}")
+        print(f"   {meta['total_pages']} páginas renderizadas a {meta['dpi']} dpi → {workspace_dir / 'pages'}")
+        for p in meta["pages"]:
+            print(f"     p{p['page']:>3} → {p['png']} ({p['png_size_kb']} KB) + {p['txt']} ({p['txt_chars']} chars)")
+        return
+
+    if args.command == "triage":
+        from .module_triage import triage_pdf  # noqa: PLC0415
+        pdf_path = args.pdf_path.resolve()
+        ws_name = args.workspace or pdf_path.stem
+        output_dir = settings.workdir / ws_name / "triage"
+        result = triage_pdf(
+            pdf_path, output_dir,
+            kind=args.kind,
+            contact_sheet=not args.no_contact_sheet,
+            contact_sheet_dpi=args.dpi,
+        )
+        print(f"📄 {pdf_path.name}  ({result.total_pages} páginas)")
+        print(f"   tipo: {result.kind}   método: {result.method}   confiança: {result.confidence}")
+        keep = result.pages_to_process
+        if len(keep) <= 30:
+            keep_str = ", ".join(map(str, keep))
+        else:
+            keep_str = f"{keep[0]}–{keep[-1]} ({len(keep)})"
+        print(f"   manter: [{keep_str}]")
+        if result.pages_excluded:
+            print(f"   excluir ({len(result.pages_excluded)}):")
+            for p in sorted(result.pages_excluded):
+                print(f"     p{p}: {result.pages_excluded[p]}")
+        for note in result.notes:
+            print(f"   ⚠️  {note}")
+        print(f"   manifesto: {result.manifest_path}")
+        if result.contact_sheet_path:
+            print(f"   contact sheet: {result.contact_sheet_path}")
+        if result.needs_review:
+            print("   🔎 needs_review=true — abrir contact sheet e ajustar pages_to_process se necessário.")
         return
 
     if args.command == "reextract-images":
