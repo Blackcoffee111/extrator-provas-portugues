@@ -23,7 +23,7 @@ from pathlib import Path
 from . import overlay as overlay_mod
 from .schemas import Question, dump_questions, load_questions
 
-_DEFAULT_PORT = 8798
+_DEFAULT_PORT = 8799
 
 # ── Conversão Markdown/LaTeX → HTML ──────────────────────────────────────────
 
@@ -449,6 +449,8 @@ def _render_question(q: Question, index: int, show_context: bool = True, overrid
         if q.resolucoes_alternativas:
             alts = ""
             for ai, alt in enumerate(q.resolucoes_alternativas, 0):
+                if isinstance(alt, dict):
+                    alt = json.dumps(alt, ensure_ascii=False)
                 alt_esc = html.escape(alt)
                 alts += f"""<li class="cc-alt-item" data-alt-idx="{ai}">
   <div class="cc-row-content">
@@ -1842,11 +1844,11 @@ def run_preview(
     class _ReuseServer(socketserver.TCPServer):
         allow_reuse_address = True
 
-    with _ReuseServer(("localhost", port), handler_class) as httpd:
+    with _ReuseServer(("127.0.0.1", port), handler_class) as httpd:
         t = threading.Thread(target=httpd.serve_forever, daemon=True)
         t.start()
 
-        url = f"http://localhost:{port}"
+        url = f"http://127.0.0.1:{port}"
         print(f"[preview] A abrir {url}")
         print("[preview] Edite e reveja as questões antes da aprovação final.")
         print("[preview] Prima Ctrl+C para fechar o servidor quando terminar.")
