@@ -49,7 +49,15 @@ def _keep_only_v1(text: str, tipo: str | None) -> str:
 
 
 def _strip_group_prefix(item_id: str) -> str:
-    return re.sub(r"^[ivx]+-", "", item_id.strip(), flags=re.IGNORECASE)
+    """Remove o prefixo de GRUPO ('I-', 'II-', ...) e o segmento de PARTE
+    PT ('A-', 'B-', 'C-') quando presentes, devolvendo apenas o número.
+
+    Ex.: 'I-A-1' → '1', 'II-3' → '3', '4.1' → '4.1'.
+    """
+    s = item_id.strip()
+    s = re.sub(r"^[ivx]+-", "", s, flags=re.IGNORECASE)        # I-, II-, III-
+    s = re.sub(r"^[A-C]-", "", s)                               # A-, B-, C-
+    return s
 
 
 def _looks_contaminated_for_item(question: Question, criterio: CriterioRaw) -> list[str]:
@@ -145,7 +153,15 @@ def merge_cc(criterios_path: Path, questoes_path: Path, force: bool = False) -> 
 
         key = (q.id_item or str(q.numero_questao)).lower().strip()
         criterio = criterio_map.get(key)
-        # Fallback: tentar sem o prefixo de grupo, mas só para itens do Grupo II
+        # Fallback 1: strip da PARTE (PT) — questões podem ter `I-A-1` mas o
+        # CC-VD numera sequencialmente sem partes (`I-1`, `I-2`, ...). Tira
+        # o segmento "A"/"B"/"C" do meio do id e tenta de novo.
+        # Ex.: `i-a-1` → `i-1`, `i-b-4` → `i-4`.
+        if criterio is None:
+            parte_stripped = re.sub(r"^([iv]+)-[a-c]-", r"\1-", key)
+            if parte_stripped != key:
+                criterio = criterio_map.get(parte_stripped)
+        # Fallback 2: tentar sem o prefixo de grupo, mas só para itens do Grupo II
         # (Grupo I tem os mesmos números que Grupo II e causaria matches errados)
         if criterio is None and key.startswith("ii-"):
             plain_key = re.sub(r"^ii-", "", key)
