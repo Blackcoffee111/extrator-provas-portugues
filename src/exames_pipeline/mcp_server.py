@@ -42,22 +42,31 @@ _PKG = "exames_pipeline.cli"
 mcp = FastMCP(
     "Exames Nacionais Pipeline",
     instructions=(
-        "SEQUÊNCIA LINEAR OBRIGATÓRIA — nunca saltar nem paralelizar passos:\n"
-        "    1. run_stage(extract, pdf_path='...') ← SEMPRE PRIMEIRO; pré-processa + tenta MinerU auto\n"
-        "       Se retornar '⚠️ MinerU falhou': pedir ao utilizador para correr o comando exacto impresso\n"
-        "       e depois chamar run_stage(extract) SEM pdf_path — normaliza output automaticamente.\n"
+        "SEQUÊNCIA LINEAR OBRIGATÓRIA — nunca saltar nem paralelizar passos.\n"
+        "ANTES de extrair, INVOCAR a skill `/exames` para o checklist completo.\n"
+        "    1. Extracção do PDF — DEFAULT é Sonnet 4.6 (skill `/exames` §2a):\n"
+        "         a) CLI `triage` → marca páginas úteis em pages_manifest.json\n"
+        "         b) CLI `prepare-pages` → renderiza pages/page_NNN.png + .txt\n"
+        "         c) Lançar sub-agente Sonnet 4.6 (Agent subagent_type='general-purpose',\n"
+        "            model='sonnet') com o prompt da skill — gera prova.md fiel ao PDF\n"
+        "         d) run_stage(extract) SEM pdf_path — pipeline lê o prova.md\n"
+        "       FALLBACK (apenas se Sonnet falhar ou utilizador pedir explicitamente):\n"
+        "         run_stage(extract, pdf_path='...') ← caminho MinerU (skill §2b)\n"
         "    2. AGENTE revê prova.md (Read + Edit)\n"
         "    3. AGENTE revê questoes_review.json (reviewed:true + categorização em cada item)\n"
         "    4. run_stage(validate)  ← só avança quando TODOS os itens tiverem reviewed:true\n"
-        "    5. run_stage(cc, pdf_cc_path='...') ← tenta MinerU CC-VD auto; mesmo fallback acima\n"
+        "    5. Extracção do CC-VD — mesmo fluxo Sonnet (triage + prepare-pages +\n"
+        "       sub-agente Sonnet com prompt CC-VD da skill) → run_stage(cc) sem pdf_cc_path.\n"
+        "       FALLBACK MinerU: run_stage(cc, pdf_cc_path='...').\n"
         "    6. AGENTE revê criterios_review.json + criterios_ocr_flags.json\n"
         "       (para OCR-SUSPECT: usar get_cc_context(); documentar em OCR-RESOLVED: ou OCR-FALSE-POSITIVE:)\n"
         "    7. run_stage(cc)  ← 2ª chamada (cc_validate)\n"
         "    8. run_stage(merge)\n"
         "    9. run_review  ← humano aprova no browser\n"
         "   10. run_stage(upload)\n"
-        "Em dúvida: workspace_status(). Correcções pós-merge: run_fix_question() / run_fix_cc() — não destrutivos.\n"
-        "NUNCA pedir ao utilizador para correr MinerU antes de tentar run_stage com pdf_path.\n"
+        "Em dúvida: workspace_status() ou ler skill `/exames`. Correcções pós-merge:\n"
+        "run_fix_question() / run_fix_cc() — não destrutivos.\n"
+        "NUNCA pular o caminho Sonnet sem motivo declarado.\n"
         "NUNCA pedir cp manual de prova.md ou images/ — run_stage normaliza o output automaticamente."
     ),
 )
@@ -685,7 +694,7 @@ def _start_preview_background(json_path: Path, cli_cmd: str, port: int) -> str:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    return f"http://localhost:{port}"
+    return f"http://127.0.0.1:{port}"
 
 
 def _snapshot_before_stage(ws_dir: Path, stage: str) -> None:
@@ -854,13 +863,24 @@ def run_stage(
 ) -> str:
     """Executa um estágio do pipeline: extract | validate | cc (×2) | merge | upload | reextract-images.
 
+    IMPORTANTE — fluxo de extracção PT (default Sonnet 4.6, skill `/exames` §2a):
+      Para EXTRAIR uma prova nova, o caminho recomendado NÃO é chamar este tool
+      directamente com `pdf_path`. É:
+        1) CLI `triage` + `prepare-pages` (gera pages/page_NNN.png + .txt)
+        2) Sub-agente Sonnet 4.6 transcreve para workspace/<NOME>/prova.md
+        3) `run_stage(stage='extract')` SEM `pdf_path` ← este tool
+      Passar `pdf_path` aqui dispara o fallback MinerU (skill §2b) — usar apenas
+      se Sonnet falhar ou o utilizador pedir explicitamente.
+
     Args:
-        workspace:    Nome do workspace (ex: "EX-MatA635-F1-2024_net")
+        workspace:    Nome do workspace (ex: "EX-Port639-F1-2024_net")
         stage:        extract | validate | cc | merge | upload | reextract-images
-        pdf_path:     PDF absoluto da prova (extract, se prova.md não existir;
-                      reextract-images: PDF original, sem pré-processamento)
+        pdf_path:     [FALLBACK MinerU] PDF absoluto da prova. Omitir quando o
+                      prova.md já existe (caminho Sonnet); reextract-images:
+                      PDF original, sem pré-processamento.
         workspace_cc: Workspace CC-VD (cc/merge; auto-detectado se omitido)
-        pdf_cc_path:  PDF absoluto do CC-VD (cc, 1ª chamada, se prova.md não existir)
+        pdf_cc_path:  [FALLBACK MinerU] PDF absoluto do CC-VD. Idem `pdf_path`
+                      mas para o cc-extract (1ª chamada).
         force:        Ignora protecção de estado (DESTRUTIVO)
 
     Notas sobre reextract-images:
@@ -943,13 +963,13 @@ def run_stage(
                 result = _run(args)
             else:
                 return (
-                    f"❌ Nenhum PDF nem output do MinerU encontrado em '{workspace}'.\n\n"
-                    f"Opção A (recomendada): run_stage(workspace='{workspace}', stage='extract', pdf_path='<CAMINHO>')\n"
-                    f"  → pré-processa o PDF e tenta correr MinerU automaticamente.\n\n"
-                    f"Opção B (MinerU manual):\n"
-                    f"  .venv-mineru/bin/mineru -b pipeline -p '<PDF>' -o workspace/{workspace}\n"
-                    f"  Depois: run_stage(workspace='{workspace}', stage='extract') sem pdf_path\n"
-                    f"  → normaliza automaticamente o output, sem copiar ficheiros à mão."
+                    f"❌ Nenhum PDF nem prova.md encontrado em '{workspace}'.\n\n"
+                    f"Opção A (recomendada — Sonnet 4.6, skill `/exames` §2a):\n"
+                    f"  1) PYTHONPATH=src python3.11 -m exames_pipeline.cli triage <PDF> --workspace {workspace}\n"
+                    f"  2) PYTHONPATH=src python3.11 -m exames_pipeline.cli prepare-pages <PDF> --workspace {workspace}\n"
+                    f"  3) Sub-agente Sonnet 4.6 transcreve pages/ → workspace/{workspace}/prova.md\n"
+                    f"  4) run_stage(workspace='{workspace}', stage='extract')  # sem pdf_path\n\n"
+                    f"Opção B (fallback MinerU): run_stage(workspace='{workspace}', stage='extract', pdf_path='<CAMINHO>')"
                 )
 
         if result["ok"]:
@@ -1099,12 +1119,12 @@ def run_stage(
                 if not normalized_cc:
                     return (
                         f"❌ prova.md não encontrado em '{workspace_cc}'.\n\n"
-                        f"Opção A (recomendada): run_stage(workspace='{workspace}', stage='cc', workspace_cc='{workspace_cc}', pdf_cc_path='<CAMINHO-CC-VD.pdf>')\n"
-                        f"  → tenta correr MinerU automaticamente.\n\n"
-                        f"Opção B (MinerU manual):\n"
-                        f"  .venv-mineru/bin/mineru -b pipeline -p '<CC-VD.pdf>' -o workspace/{workspace_cc}\n"
-                        f"  Depois: run_stage(workspace='{workspace}', stage='cc', workspace_cc='{workspace_cc}')\n"
-                        f"  → normaliza automaticamente o output, sem copiar ficheiros à mão."
+                        f"Opção A (recomendada — Sonnet 4.6, skill `/exames` §6a):\n"
+                        f"  1) PYTHONPATH=src python3.11 -m exames_pipeline.cli triage <CC-VD.pdf> --workspace {workspace_cc}\n"
+                        f"  2) PYTHONPATH=src python3.11 -m exames_pipeline.cli prepare-pages <CC-VD.pdf> --workspace {workspace_cc}\n"
+                        f"  3) Sub-agente Sonnet 4.6 transcreve pages/ → workspace/{workspace_cc}/prova.md\n"
+                        f"  4) run_stage(workspace='{workspace}', stage='cc', workspace_cc='{workspace_cc}')  # sem pdf_cc_path\n\n"
+                        f"Opção B (fallback MinerU): run_stage(workspace='{workspace}', stage='cc', workspace_cc='{workspace_cc}', pdf_cc_path='<CAMINHO>')"
                     )
 
         # Gate obrigatório: prova principal deve estar validated antes de processar CC-VD
@@ -1401,7 +1421,7 @@ def run_stage(
                     review_flag.unlink()
                     ws.reset_to("cc_merged")
                 snapshot.unlink(missing_ok=True)
-                url = _start_preview_background(final, "preview", 8798)
+                url = _start_preview_background(final, "preview", 8799)
                 # Aviso destacado se merge excluiu itens (mesmo com force=True)
                 excl_post_merge = _excluded_items_summary(workspace)
                 if excl_post_merge["has_exclusions"]:
@@ -1617,7 +1637,7 @@ def run_review(workspace: str) -> str:
                 f"Corre run_stage(stage='merge') primeiro."
             )
 
-    url = _start_preview_background(final, "preview", 8798)
+    url = _start_preview_background(final, "preview", 8799)
     review_flag = _workspace_path(workspace) / ".review_approved"
     status = "✅ Já aprovado" if review_flag.exists() else "⏳ Aguarda aprovação humana"
 
