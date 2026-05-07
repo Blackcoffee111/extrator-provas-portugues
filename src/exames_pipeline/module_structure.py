@@ -20,7 +20,7 @@ from .utils import (
     split_markdown_question_blocks,
 )
 
-_HEADING_PREFIX_RE = _re.compile(r"^\s*\d+(?:\.\d+)*\.?\s*")
+_HEADING_PREFIX_RE = _re.compile(r"^\s*(?:\*\*\s*)?\d+(?:\.\d+)*\.?(?:\s*\*\*)?\s*")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 # Auto-correcções tipográficas PT (sem LaTeX)
@@ -98,7 +98,7 @@ _ALTERNATIVES_IN_ENUNCIADO_PATTERN = re.compile(r"\s*\(A\)[\s\S]*$")
 # Secções do prova.md que não contêm questões e devem ser ignoradas pelo agente.
 # Tudo antes do primeiro "# GRUPO" ou do primeiro item numerado é capa/formulário.
 _PRE_QUESTIONS_BOUNDARY_RE = re.compile(
-    r"(?m)^#\s+GRUPO\s+[IVX\d]",
+    r"(?m)^#{1,3}\s+GRUPO\s+[IVX\d]",
     re.IGNORECASE,
 )
 

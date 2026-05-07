@@ -358,30 +358,23 @@ python scratch/migrate_cotacoes.py <path>         # migra um ficheiro específic
 
 O extractor já corta o markdown na âncora `# CRITÉRIOS ESPECÍFICOS DE CLASSIFICAÇÃO` e descarta tudo o que vem antes. **Não tentar ler o PDF do CC-VD para preencher campos que já estão no markdown.** Se algo parece em falta, ler primeiro `workspace/<NOME>-CC-VD_net/prova.md` — o MinerU já transcreveu o texto, incluindo tabelas. O PDF é último recurso (e.g. assinatura/imagem que o MinerU não conseguiu transcrever).
 
-### O que **ignorar sempre** no CC-VD de Português
+### Tabelas no CC — regra única: **só a tabela de chave MC**
 
-São conteúdo genérico, repetido em todas as provas — não copiar, não transcrever, não tentar ler do PDF:
+No CC-VD de Português há vários tipos de tabela. A regra é simples: **só a tabela de chave de respostas de escolha múltipla é transcrita; todas as outras são ignoradas.**
 
-1. **Critérios Gerais de Classificação** — primeiras ~3 páginas do PDF. Preâmbulo legal/operacional do IAVE; o extractor já as descarta automaticamente cortando na âncora `# CRITÉRIOS ESPECÍFICOS DE CLASSIFICAÇÃO`.
-2. **Tabela CL ("Aspectos de correção linguística")** — grelha 3 pontos baseada em erros tipo A / tipo B. É o mesmo template em todos os anos; o pipeline já a cobre via `parametros_classificacao`.
+| Tabela | O que fazer |
+|--------|-------------|
+| **Chave de respostas MC** (`Item \| Versão 1 \| Versão 2 \| Pontuação`) | **Transcrever.** O `cc_extract` expande automaticamente em linhas `N. Chave: (X) M pontos`. |
+| **Critérios Gerais de Classificação** (3 páginas iniciais) | **Ignorar.** O extractor já corta na âncora `# CRITÉRIOS ESPECÍFICOS DE CLASSIFICAÇÃO`. |
+| **Tabela CL** ("Aspectos de correção linguística") | **Ignorar.** Genérica em todas as provas; já coberta por `parametros_classificacao`. |
+| **Tabela C-ED** ("Aspectos de conteúdo e de estruturação do discurso", Nível 5/4/3/2/1) | **Ignorar.** Não capturar nem o descritor do nível máximo. Os níveis intermédios não são usados; o conteúdo do nível máximo está implícito na "Resolução completa". |
+| Qualquer outra tabela em itens de resposta extensa | **Ignorar.** |
 
-### Tabela C-ED — capturar **apenas o descritor do nível máximo** via PyMuPDF
+**Para questões de resposta extensa (open_response, essay):** captura apenas o texto da **"Resolução completa"** (ou rótulo equivalente que precede a resposta sugerida). Esse texto vai para `solucao` e é espelhado automaticamente em `criterios_parciais[0].descricao` pelo extractor.
 
-A tabela "Aspectos de conteúdo e de estruturação do discurso (C-ED)" tem **descritores específicos** de cada questão — não é genérica como a CL. Mas só o **descritor do nível com pontuação máxima** (tipicamente Nível 5 / 10 pontos) deve ser capturado; os níveis intermédios são derivados.
+**Por que ignorar tabelas de descritores?** Reduz drasticamente o tempo de transcrição do Sonnet (cada CC tem ~5-10 destas tabelas, todas redundantes). O classificador humano usa a "Resolução completa" como referência; a grelha de níveis é interna ao IAVE.
 
-O MinerU pode não preservar a estrutura tabular fielmente. Usar **PyMuPDF (`fitz`)** para extrair o texto directamente do PDF do CC-VD na página onde está a tabela:
-
-```python
-import fitz
-doc = fitz.open("provas fonte/.../EX-Port639-...-CC.pdf")
-page = doc[N - 1]   # N = página da tabela C-ED do item (1-indexed → 0-indexed)
-text = page.get_text()
-# Localizar o bloco entre "Níveis" e a linha "4" (ou "OU") — é o descritor do Nível 5
-```
-
-Colocar o texto extraído num único `criterios_parciais` da questão essay (ou no campo apropriado), com `pontos` igual à pontuação máxima indicada na bullet ("10 pontos" no exemplo). **Não copiar os níveis 4–1** nem a tabela inteira.
-
-Se o agente encontrar a tabela CL ou descritores intermédios da C-ED a contaminar `solucao`/`criterios_parciais`, **apagar** — deixar só o descritor do nível máximo.
+Como reforço, o `cc_extract` aplica um filtro defensivo: tabelas markdown que **não** são chaves MC são removidas do corpo antes do parse — se uma escapar para o `prova.md`, é silenciosamente ignorada.
 
 ### Como ler a chave de respostas do GRUPO II (MC)
 
@@ -396,19 +389,19 @@ Mapear cada linha (`1. → C`, `2. → A`, …) ao `id_item` correspondente em `
 
 ### Espelhar `solucao` em `criterios_parciais`
 
-Para questões de resposta extensa (`open_response`, `essay`), depois de preencher `solucao` (a "Resolução completa" / resposta esperada), **copiar o mesmo texto também para `criterios_parciais`** como descrição do critério principal (tipicamente o do nível de pontuação máxima da C-ED).
+Para questões de resposta extensa (`open_response`, `essay`), depois de preencher `solucao` (a "Resolução completa" / resposta esperada), o pipeline copia automaticamente o mesmo texto para `criterios_parciais[0].descricao`.
 
-Motivo: o preview e o Supabase mostram os dois campos por caminhos diferentes — `solucao` aparece no painel "Ver resolução completa", `criterios_parciais` aparece nos critérios de classificação. O classificador humano deve ver o conteúdo da resolução em ambos os sítios; deixar `criterios_parciais` vazio ou só com o descritor genérico C-ED esconde a resposta esperada do utilizador final.
+Motivo: o preview e o Supabase mostram os dois campos por caminhos diferentes — `solucao` aparece no painel "Ver resolução completa", `criterios_parciais` aparece nos critérios de classificação. O classificador humano deve ver o conteúdo da resolução em ambos os sítios. Esse espelho é feito por `_mirror_solucao_into_criterios()` em `cc_extract.py`; o agente apenas precisa garantir que `solucao` contém o texto integral da resolução.
 
-Padrão para questões essay com tabela C-ED:
+Padrão final para questões essay/open_response:
 
 ```json
 "solucao": "<texto integral da resolução completa>",
 "criterios_parciais": [
   {
-    "nivel": "5",
-    "pontos": 10,
-    "descricao": "<descritor C-ED do Nível 5> + <texto integral da resolução completa>"
+    "nivel": "",
+    "pontos": <cotação total>,
+    "descricao": "<texto integral da resolução completa>"
   }
 ]
 ```
