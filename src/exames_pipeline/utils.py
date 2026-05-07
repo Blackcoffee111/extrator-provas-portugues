@@ -536,7 +536,47 @@ def normalize_pt_prova_markdown(markdown_text: str) -> str:
         )
         text = before + obs_section + tail
 
+    # ── (P_LINHA1) Remover marcador "1 " espúrio em excertos PT ───────────
+    # Convenção IAVE: a margem do PDF marca apenas múltiplos de 5
+    # (5, 10, 15, …). Sub-agentes Sonnet por vezes prefixam a 1.ª linha
+    # do excerto com "1" mesmo sem haver tal marcador no PDF. Detecta-se
+    # por: linha "1 <texto>" seguida (em ≤8 linhas) de outra "5 <texto>"
+    # — o "1" é então removido. Não toca em "1." (cabeçalho de questão)
+    # nem em "1 <texto>" sem "5 <texto>" próximo.
+    text = _strip_stray_line_one_in_excerpts(text)
+
     return text
+
+
+_LINE_MARKER_RE = re.compile(r"(?m)^(?P<num>\d{1,3})\s+(?=\S)")
+
+
+def _strip_stray_line_one_in_excerpts(markdown_text: str) -> str:
+    """Remove ocorrências espúrias de "1 " no início de linhas de excerto."""
+    lines = markdown_text.splitlines(keepends=True)
+    # Encontrar índices de linhas que começam com "N <texto>" (N inteiro)
+    marker_lines: list[tuple[int, int]] = []  # (idx, num)
+    for i, ln in enumerate(lines):
+        m = _LINE_MARKER_RE.match(ln)
+        if m:
+            marker_lines.append((i, int(m.group("num"))))
+    # Para cada "1" que tem outro marcador "5" dentro de 8 linhas a seguir,
+    # remover o "1 " do início desta linha.
+    to_strip: set[int] = set()
+    for j, (idx, num) in enumerate(marker_lines):
+        if num != 1:
+            continue
+        # Procurar próximo marcador real (5, 10, 15, …) dentro de 8 linhas
+        for idx2, num2 in marker_lines[j + 1 : j + 6]:
+            if idx2 - idx <= 8 and num2 == 5:
+                to_strip.add(idx)
+                break
+    if not to_strip:
+        return markdown_text
+    out = list(lines)
+    for idx in to_strip:
+        out[idx] = re.sub(r"^1\s+", "", out[idx], count=1)
+    return "".join(out)
 
 
 def synthesize_grupo_iii_essay_block(

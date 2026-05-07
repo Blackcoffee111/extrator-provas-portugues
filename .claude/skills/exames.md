@@ -74,13 +74,18 @@ Regras de transcrição:
 3. Excerto literário: marcar números de linha apenas nos múltiplos de 5
    que aparecem na margem do PDF. Cada marcador no início da sua linha:
    "5 texto da linha 5".
+   🚫 NUNCA prefixar a 1.ª linha do excerto com "1". Se o PDF não tem
+   "1" na margem (e nas provas IAVE NÃO TEM — começa sempre em "5"),
+   o markdown também não tem. Os únicos marcadores válidos são os que
+   aparecem fisicamente na margem do PDF (5, 10, 15, 20, …).
    ⚠️ FONTE AUTORITATIVA = page_NNN.txt (PyMuPDF, prepare-pages).
    Esse .txt já vem com os marcadores fundidos in-line com a sua linha
    correcta (ex.: "5 perder-se numa das mais perfeitas..."). USAR O .TXT
    para decidir em que linha do markdown colocar cada marcador. Não
    recontar linhas do PNG nem adivinhar — o alinhamento Y já foi feito.
-   O PNG serve para validar a tipografia (itálicos, sobrescritos, «»),
-   não para localizar marcadores.
+   Se o .txt não tem "1 X" no início de um excerto, o markdown também
+   não pode ter. O PNG serve para validar a tipografia (itálicos,
+   sobrescritos, «»), não para localizar marcadores.
 4. NOTAS: transcrever literalmente; nunca deduzir ou completar.
 5. COTAÇÕES: copiar a tabela como tabela markdown 3-col
    (Grupo | Item | Cotação).
