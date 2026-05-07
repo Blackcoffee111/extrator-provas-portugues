@@ -421,6 +421,162 @@ def detect_partes(markdown_text: str) -> list[tuple[int, str]]:
 
 
 # ---------------------------------------------------------------------------
+# Normalização defensiva do markdown PT antes do splitter de questões.
+#
+# Cobre 3 problemas que o sub-agente Sonnet pode produzir em provas antigas:
+#
+#  (P5) Partes A/B/C sem heading marker — em provas pré-2024 a margem do PDF
+#       mostra apenas a letra ("B") sem "Parte B" nem cabeçalho visual claro.
+#       Sonnet pode então emiti-la como linha solta `B` ou `**B**`, sem `##`.
+#       O texto da parte fica então fundido com a questão anterior. Promove-se
+#       a `## B` quando a letra está sozinha numa linha dentro de um GRUPO já
+#       activo e a sequência (A → B → C) é coerente.
+#
+#  (P2) Observações `1.`/`2.` confundidas com questões — o GRUPO III tem uma
+#       secção "**Observações:**" no fim com itens enumerados `1.` `2.` que o
+#       parser de questões captura como itens reais. A normalização re-escreve
+#       essas linhas como `(1)` `(2)` para neutralizar o splitter.
+# ---------------------------------------------------------------------------
+
+# Linha contendo APENAS A/B/C (com ou sem **bold**), sem heading marker.
+_LONE_PART_LETTER_RE = re.compile(
+    r"(?m)^[ \t]*(?:\*\*\s*)?(?P<letra>[A-C])(?:\s*\*\*)?[ \t]*$"
+)
+
+# Início da secção Observações (negrito ou rótulo simples).
+_OBSERVACOES_RE = re.compile(
+    r"(?mi)^[ \t]*(?:\*\*)?\s*Observa[çc][oõ]es\s*:?\s*(?:\*\*)?[ \t]*$"
+)
+
+# Linha "N. texto..." (com ou sem **) para reescrever como "(N) texto..."
+# `[ \t]*` em vez de `\s*` para NÃO atravessar `\n` — caso contrário, o
+# `\s*` antes de `\d` consome as linhas em branco que separam Observações.
+_NUMBERED_OBS_RE = re.compile(
+    r"(?m)^(?P<indent>[ \t]*)(?:\*\*)?[ \t]*(?P<num>\d{1,2})[ \t]*\.[ \t]*(?:\*\*)?[ \t]+(?P<rest>.+)$"
+)
+
+
+def normalize_pt_prova_markdown(markdown_text: str) -> str:
+    """Aplica normalizações defensivas em provas PT antes do splitter.
+
+    Idempotente: passar o resultado pela função de novo não altera nada.
+    """
+    text = markdown_text
+
+    # ── (P5) promover letras de Parte isoladas a `## A`/`## B`/`## C` ──────
+    # Só promove se:
+    #   • a linha contém APENAS A/B/C (com ou sem **)
+    #   • estamos dentro de um GRUPO (já vimos `# GRUPO X`)
+    #   • ainda não há `## <letra>` activo para esta letra no GRUPO actual
+    #   • a letra avança a sequência esperada (A primeiro, depois B, depois C)
+    # Implementação linha-a-linha — mais legível que regex global.
+    out_lines: list[str] = []
+    in_grupo = False
+    seen_partes: set[str] = set()  # letras já promovidas dentro do grupo actual
+    for line in text.splitlines():
+        if _GRUPO_HEADING_RE.match(line):
+            in_grupo = True
+            seen_partes = set()
+            out_lines.append(line)
+            continue
+        # Já é cabeçalho de PARTE? Marcar como vista, não promover.
+        m_parte = _PARTE_HEADING_RE.match(line)
+        if m_parte:
+            seen_partes.add(_parte_letra(m_parte))
+            out_lines.append(line)
+            continue
+        # Candidato a promoção?
+        m_lone = _LONE_PART_LETTER_RE.match(line)
+        if in_grupo and m_lone:
+            letra = m_lone.group("letra").upper()
+            # Promove se a letra ainda não foi vista neste GRUPO E avança a
+            # sequência. (A primeiro; B só se A já vista ou se for a primeira;
+            # C só se B já vista.)
+            expected_next = "A" if not seen_partes else (
+                "B" if "A" in seen_partes and "B" not in seen_partes else (
+                    "C" if "B" in seen_partes and "C" not in seen_partes else None
+                )
+            )
+            if letra == expected_next:
+                out_lines.append(f"## {letra}")
+                seen_partes.add(letra)
+                continue
+        out_lines.append(line)
+    text = "\n".join(out_lines)
+
+    # ── (P2) Re-escrever Observações: 1./2. → (1)/(2) ──────────────────────
+    # Detectar a posição de "**Observações:**" e reescrever apenas as linhas
+    # numeradas que aparecem entre essa âncora e o próximo cabeçalho `#`/`##`.
+    obs_match = _OBSERVACOES_RE.search(text)
+    if obs_match:
+        before = text[: obs_match.end()]
+        rest = text[obs_match.end():]
+        # Encontrar próximo cabeçalho (#) que termina a secção Observações
+        next_heading = re.search(r"(?m)^#{1,3}\s", rest)
+        cut = next_heading.start() if next_heading else len(rest)
+        obs_section = rest[:cut]
+        tail = rest[cut:]
+        # Reescrever linhas "N. ..." → "(N) ..."
+        obs_section = _NUMBERED_OBS_RE.sub(
+            lambda m: f"{m.group('indent')}({m.group('num')}) {m.group('rest')}",
+            obs_section,
+        )
+        text = before + obs_section + tail
+
+    return text
+
+
+def synthesize_grupo_iii_essay_block(
+    markdown_text: str, existing_blocks: list[MarkdownQuestionBlock]
+) -> MarkdownQuestionBlock | None:
+    """Cria bloco sintético `III-1` quando GRUPO III existe sem item numerado.
+
+    Em provas antigas a dissertação do GRUPO III não tem número visível no
+    PDF; Sonnet/MinerU podem então não emitir um cabeçalho de questão. Este
+    fallback garante que `III-1` é sempre criado a partir do conteúdo do grupo.
+
+    Devolve `None` se:
+      • não houver `# GRUPO III` no markdown, ou
+      • já existir pelo menos um bloco com grupo == "III".
+    """
+    grupo_iii = None
+    for m in _GRUPO_HEADING_RE.finditer(markdown_text):
+        if _ROMANO_CANON.get(m.group("num").upper(), "") == "III":
+            grupo_iii = m
+            break
+    if grupo_iii is None:
+        return None
+    # Já existe algum bloco em GRUPO III? Aproximação: bloco cuja posição
+    # source_span começa depois de # GRUPO III.
+    grupo_iii_start_line = markdown_text[: grupo_iii.start()].count("\n") + 1
+    for block in existing_blocks:
+        if block.source_span.get("line_start", 0) >= grupo_iii_start_line:
+            # Há conteúdo numerado depois de # GRUPO III — não sintetizar.
+            return None
+    # Extrair conteúdo do GRUPO III (do fim do heading até COTAÇÕES ou EOF).
+    body_start = grupo_iii.end()
+    cot_match = re.search(r"(?m)^#{1,3}\s*COTA[ÇC][ÕO]ES\b", markdown_text)
+    body_end = cot_match.start() if cot_match and cot_match.start() > body_start else len(markdown_text)
+    body = markdown_text[body_start:body_end].strip()
+    if not body:
+        return None
+    end_line = grupo_iii_start_line + body.count("\n")
+    return MarkdownQuestionBlock(
+        ordem_item=0,  # ajustado por chamadores
+        item_id="III-1",
+        numero_principal=1,
+        subitem=None,
+        heading_label_raw="1",
+        raw_markdown=body,
+        imagens=extract_image_paths(body),
+        imagens_contexto=extract_image_paths(body),
+        source_span={"line_start": grupo_iii_start_line + 1, "line_end": end_line},
+        inferred_type="essay",
+        grupo="III",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Normalização de números de linha em preâmbulos de Português
 # ---------------------------------------------------------------------------
 # O MinerU pode OCRizar números de linha de um excerto/texto expositivo de
@@ -1182,6 +1338,11 @@ def _redistribute_images_by_reference(
 
 
 def split_markdown_question_blocks(markdown_text: str) -> list[MarkdownQuestionBlock]:
+    # Normalização defensiva PT: promove letras de PARTE isoladas a `## A`/`## B`
+    # e reescreve "Observações: 1." → "Observações: (1)" para evitar que o
+    # splitter capture pseudo-itens. Idempotente.
+    markdown_text = normalize_pt_prova_markdown(markdown_text)
+
     # Fix OCR artefact: subitem heading fused inline after other content.
     # e.g. "...fórmula \* 13.1. Qual é..." → "...fórmula\n\n13.1. Qual é..."
     # The \* (escaped asterisk) acts as a separator in some PDFs.
@@ -1361,6 +1522,12 @@ def split_markdown_question_blocks(markdown_text: str) -> list[MarkdownQuestionB
                         block.item_id = f"{block.grupo}-{parte_ativa}-{suffix}"
                     else:
                         block.item_id = f"{parte_ativa}-{block.item_id}"
+
+    # ── Fallback III-1: GRUPO III sem item numerado (ensaio sem cabeçalho) ───
+    iii_block = synthesize_grupo_iii_essay_block(markdown_text, blocks)
+    if iii_block is not None:
+        iii_block.ordem_item = (max((b.ordem_item for b in blocks), default=0) + 1)
+        blocks.append(iii_block)
 
     return blocks
 

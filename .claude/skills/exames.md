@@ -80,6 +80,16 @@ Regras de transcrição:
 6. Imagens/figuras: substituir por descrição entre [colchetes] se essenciais
    à compreensão; ignorar logos e decoração.
 7. Lacunas que o aluno preenche (_____, ——) preservar exactamente.
+8. PARTES (A/B/C) dentro de um GRUPO: SEMPRE emitir como `## A`, `## B`,
+   `## C` numa linha isolada, MESMO quando o PDF apenas mostra a letra na
+   margem sem cabeçalho visual claro (frequente em provas pré-2024). Sem
+   este heading, o texto da parte fica fundido com a questão anterior.
+9. Secção "Observações:" no GRUPO III — usar `(1)`, `(2)` (parêntesis) em
+   vez de `1.`, `2.`. O parser ignoraria à mesma (filtro defensivo) mas o
+   `(N)` é mais robusto.
+10. Dissertação do GRUPO III sem número visível no PDF: prefixar com
+    `**1.**` antes do enunciado. (O parser sintetiza `III-1` como
+    fallback se o cabeçalho faltar, mas é melhor garantir explicitamente.)
 
 Não reformatar para "estilo MinerU". O pipeline aceita este formato directamente.
 ```
