@@ -74,6 +74,13 @@ Regras de transcrição:
 3. Excerto literário: marcar números de linha apenas nos múltiplos de 5
    que aparecem na margem do PDF. Cada marcador no início da sua linha:
    "5 texto da linha 5".
+   ⚠️ FONTE AUTORITATIVA = page_NNN.txt (PyMuPDF, prepare-pages).
+   Esse .txt já vem com os marcadores fundidos in-line com a sua linha
+   correcta (ex.: "5 perder-se numa das mais perfeitas..."). USAR O .TXT
+   para decidir em que linha do markdown colocar cada marcador. Não
+   recontar linhas do PNG nem adivinhar — o alinhamento Y já foi feito.
+   O PNG serve para validar a tipografia (itálicos, sobrescritos, «»),
+   não para localizar marcadores.
 4. NOTAS: transcrever literalmente; nunca deduzir ou completar.
 5. COTAÇÕES: copiar a tabela como tabela markdown 3-col
    (Grupo | Item | Cotação).

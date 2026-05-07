@@ -283,6 +283,72 @@ def render_contact_sheet(
 
 # ── Preparação de páginas para extracção visual ──────────────────────────────
 
+
+# Marcadores de margem nos excertos PT (números 1-3 dígitos).
+_MARGIN_NUM_RE = re.compile(r"^\d{1,3}$")
+# Largura máxima (em points PDF, 72/inch) de uma linha que é apenas marcador
+# de margem. "5" tem ~6pt; "10"/"15" têm ~12pt; "100" teria ~18pt. 30pt cobre
+# largo, com folga, sem apanhar texto curto inline.
+_MARGIN_LINE_MAX_WIDTH = 30.0
+
+
+def _extract_text_with_inline_margin_numbers(page) -> str:
+    """Extrai texto PyMuPDF preservando marcadores de margem in-line.
+
+    O método default `page.get_text("text")` lê páginas em ordem de coluna —
+    os números de margem dos excertos PT (5, 10, 15, …) saem todos juntos
+    num bloco no topo da página, separados das suas linhas de corpo. Isto
+    confunde o sub-agente Sonnet que tem de inserir esses marcadores no
+    prova.md, frequentemente colocando-os na linha errada.
+
+    Esta função usa `get_text("dict")` para obter cada linha com bbox; depois
+    identifica linhas que são apenas dígitos (margens) e funde-as in-line com
+    a linha de corpo cujo Y é mais próximo. O output fica:
+
+        ...
+        ao grosso volume do romance...
+        5 perder-se numa das mais perfeitas...    ← marcador alinhado com a linha 5
+        ...
+    """
+    data = page.get_text("dict")
+    lines: list[dict] = []
+    for block in data.get("blocks", []):
+        if block.get("type", 0) != 0:  # 0 = bloco de texto
+            continue
+        for line in block.get("lines", []):
+            txt = "".join(s.get("text", "") for s in line.get("spans", [])).strip()
+            if not txt:
+                continue
+            x0, y0, x1, y1 = line["bbox"]
+            lines.append({"x0": x0, "y0": y0, "x1": x1, "y1": y1, "text": txt})
+
+    # Separar marcadores: dígitos puros + largura pequena (filtra "5" inline em texto).
+    margin = [
+        l for l in lines
+        if _MARGIN_NUM_RE.match(l["text"]) and (l["x1"] - l["x0"]) < _MARGIN_LINE_MAX_WIDTH
+    ]
+    body = [l for l in lines if l not in margin]
+
+    # Anexar cada marcador à linha de corpo com Y mais próximo (tolerância
+    # = altura do próprio marcador ou 8pt, o que for maior).
+    for m in margin:
+        my = (m["y0"] + m["y1"]) / 2
+        best, best_dy = None, None
+        for b in body:
+            dy = abs((b["y0"] + b["y1"]) / 2 - my)
+            if best_dy is None or dy < best_dy:
+                best, best_dy = b, dy
+        tol = max(m["y1"] - m["y0"], 8.0)
+        if best is not None and best_dy is not None and best_dy <= tol:
+            best["text"] = f"{m['text']} {best['text']}"
+        else:
+            # Sem linha de corpo próxima — manter como linha solta.
+            body.append(m)
+
+    body.sort(key=lambda l: (round(l["y0"], 1), round(l["x0"], 1)))
+    return "\n".join(l["text"] for l in body)
+
+
 def prepare_pages(
     pdf_path: Path,
     workspace_dir: Path,
@@ -324,7 +390,7 @@ def prepare_pages(
         pix = page.get_pixmap(matrix=matrix, alpha=False)
         pix.save(str(png_path))
 
-        text = page.get_text("text")
+        text = _extract_text_with_inline_margin_numbers(page)
         txt_path.write_text(text, encoding="utf-8")
 
         rendered.append({
