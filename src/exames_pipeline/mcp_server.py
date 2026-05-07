@@ -1991,11 +1991,21 @@ def get_context_stem_pdf_pages(workspace: str, id_item: str) -> str:
     """
     ws_dir = _workspace_path(workspace)
     prova_md = ws_dir / "prova.md"
-    pdf_path = ws_dir / "preprocessed_input.pdf"
     if not prova_md.exists():
         return f"❌ prova.md não encontrado em '{workspace}'."
+    # Caminho MinerU produz `preprocessed_input.pdf`. Caminho Sonnet 4.6 não
+    # cria esse ficheiro — cai-se de volta ao PDF original em `provas fonte/`.
+    pdf_path = ws_dir / "preprocessed_input.pdf"
     if not pdf_path.exists():
-        return f"❌ preprocessed_input.pdf não encontrado em '{workspace}'."
+        original = _find_source_pdf(workspace)
+        if original is not None:
+            pdf_path = original
+        else:
+            return (
+                f"❌ Nenhum PDF localizado para '{workspace}'. Esperado em "
+                f"`{ws_dir / 'preprocessed_input.pdf'}` (MinerU) ou em "
+                f"`provas fonte/.../{workspace[:-4] if workspace.endswith('_net') else workspace}.pdf` (Sonnet)."
+            )
 
     source_span: dict | None = None
     tipo_item: str | None = None

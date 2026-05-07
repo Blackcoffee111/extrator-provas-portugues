@@ -346,10 +346,15 @@ def _strip_pt_boilerplate(preamble: str) -> str:
 def extract_pt_group_contexts(
     markdown_text: str,
     blocks: "list[MarkdownQuestionBlock]",
-) -> dict[tuple[str, str], str]:
+) -> dict[tuple[str, str], dict]:
     """Extrai texto de preâmbulo (excerto, intro) antes do 1.º item de cada (grupo, parte).
 
-    Usado apenas para provas de Português. Devolve dict (grupo, parte) → texto.
+    Usado apenas para provas de Português. Devolve dict (grupo, parte) → info,
+    onde info é um dict com:
+      - "text":       str       — texto do preâmbulo, limpo
+      - "line_start": int       — 1.ª linha do preâmbulo no markdown
+      - "line_end":   int       — última linha do preâmbulo no markdown
+
     Semântica das chaves:
     - ("I", "")  = texto entre # GRUPO I e ## PARTE A (= excerto literário)
     - ("I", "A") = texto entre ## PARTE A e 1.ª questão de PARTE A (geralmente vazio)
@@ -363,6 +368,10 @@ def extract_pt_group_contexts(
 
     def _char_pos(line_no: int) -> int:
         return sum(len(l) for l in lines[: line_no - 1]) if line_no > 1 else 0
+
+    def _line_no(char_pos: int) -> int:
+        # 1-indexed; conta '\n' até char_pos
+        return markdown_text.count("\n", 0, char_pos) + 1
 
     # Eventos ordenados: (heading_start, text_start, grupo, parte)
     all_events: list[tuple[int, int, str, str]] = []
@@ -393,7 +402,7 @@ def extract_pt_group_contexts(
         if key not in first_block_char or cpos < first_block_char[key]:
             first_block_char[key] = cpos
 
-    result: dict[tuple[str, str], str] = {}
+    result: dict[tuple[str, str], dict] = {}
     for i, (heading_start, text_start, grupo, parte) in enumerate(all_events):
         next_boundary = all_events[i + 1][0] if i + 1 < len(all_events) else len(markdown_text)
         first_q = first_block_char.get((grupo, parte), next_boundary)
@@ -403,7 +412,11 @@ def extract_pt_group_contexts(
         preamble = re.sub(r"(?m)^#{1,4}[^\n]*\n?", "", preamble).strip()
         preamble = _strip_pt_boilerplate(preamble)
         if len(preamble) > 30:
-            result[(grupo, parte)] = preamble
+            result[(grupo, parte)] = {
+                "text": preamble,
+                "line_start": _line_no(text_start),
+                "line_end": _line_no(max(text_start, preamble_end - 1)),
+            }
 
     return result
 

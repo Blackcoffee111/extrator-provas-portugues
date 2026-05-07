@@ -346,10 +346,14 @@ def structure_markdown(settings: Settings, markdown_path: Path, fonte: str = "")
             )
             continue
 
+        # `pt_contexts` agora devolve dicts {text, line_start, line_end};
+        # extrair só o texto para o ctx string usado nas questões filhas.
+        _ctx_pt_parte = pt_contexts.get((block.grupo, block.parte))
+        _ctx_pt_grupo = pt_contexts.get((block.grupo, ""))
         ctx = (
             parent_context.get(block.numero_principal, "")
-            or pt_contexts.get((block.grupo, block.parte), "")
-            or pt_contexts.get((block.grupo, ""), "")
+            or (_ctx_pt_parte["text"] if _ctx_pt_parte else "")
+            or (_ctx_pt_grupo["text"] if _ctx_pt_grupo else "")
         )
         draft = _build_draft_question(block, resolved_fonte, resolved_materia, ctx)
         questions.append(draft)
@@ -401,8 +405,11 @@ def structure_markdown(settings: Settings, markdown_path: Path, fonte: str = "")
         # Stems da mesma parte (ex: PARTE A) são colocados antes das suas questões.
         # Stems sem questões próprias (ex: preâmbulo geral do grupo) ficam antes de tudo no grupo.
         import math as _math
-        for (grupo, parte), preamble in ordered_contexts:
+        for (grupo, parte), ctx_info in ordered_contexts:
             stem_id = stem_id_map[(grupo, parte)]
+            preamble = ctx_info["text"]
+            stem_line_start = ctx_info["line_start"]
+            stem_line_end = ctx_info["line_end"]
             notas = extract_notas_rodape(preamble)
             preamble_clean = strip_notas_section(preamble) if notas else preamble
             obs: list[str] = (
@@ -467,6 +474,7 @@ def structure_markdown(settings: Settings, markdown_path: Path, fonte: str = "")
                 reviewed=False,
                 texto_original=preamble,
                 observacoes=obs,
+                source_span={"line_start": stem_line_start, "line_end": stem_line_end},
             ))
 
         # Passo 3: fundir + ordenar por (float_order, tipo) + reatribuir ordem sequencial
