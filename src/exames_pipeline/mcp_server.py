@@ -686,8 +686,12 @@ def _start_preview_background(json_path: Path, cli_cmd: str, port: int) -> str:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(_REPO_DIR / "src")
     env["PIPELINE_ROOT"] = str(_REPO_DIR)
+    # CRÍTICO: passar --port explicitamente — o CLI tem default 8798, mas
+    # esta função é chamada com port=8799 (run_review/merge). Sem --port o
+    # servidor arranca em 8798 enquanto a URL retornada aponta para 8799,
+    # resultando em "preview em branco" do ponto de vista do agente.
     subprocess.Popen(
-        [_PYTHON, "-m", _PKG, cli_cmd, str(json_path)],
+        [_PYTHON, "-m", _PKG, cli_cmd, str(json_path), "--port", str(port)],
         env=env,
         cwd=str(_REPO_DIR),
         stdout=subprocess.DEVNULL,
