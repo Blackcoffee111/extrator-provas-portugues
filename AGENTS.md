@@ -151,6 +151,8 @@ O agente usa apenas estes 6 comandos. Tudo o resto (micro-lint, cotações, cc_e
 | `merge` | cc_merge + abre preview | `validated` + CC `cc_validated` + todos categorizados | `cc_merged` |
 | `upload` | upload Supabase + backup automático | `human_approved` | `uploaded` |
 
+> 💾 **Backup centralizado.** A pasta `backup/` deste projeto é um symlink para `/Exames Nacionais/backup-central/`, partilhada pelos 4 projetos (Mat, Bio, PT, FQ). Cada upload escreve automaticamente em `backup-central/workspaces/<nome>/` (8 ficheiros + pasta `images/` completa) e em `backup-central/supabase/*.json` (snapshot único da BD compartilhada). Ver `backup-central/README.md` para detalhes e instruções de sync para nuvem.
+
 ---
 
 ## Fluxo obrigatório (linear, unidirecional)

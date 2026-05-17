@@ -113,7 +113,20 @@ def backup_workspace_files(
             shutil.copy2(src, dest / fname)
             copied += 1
 
-    print(f"[backup] 📁 Workspace '{workspace_dir.name}': {copied} ficheiros → {dest}")
+    # Copiar pasta images/ (recortes do MinerU + ajustes manuais).
+    # Imagens são obrigatórias no backup: sem elas, prova.md e questoes_final.json
+    # ficam com referências quebradas (`![](images/...)`).
+    images_src = workspace_dir / "images"
+    images_count = 0
+    if images_src.is_dir():
+        images_dest = dest / "images"
+        if images_dest.exists():
+            shutil.rmtree(images_dest)
+        shutil.copytree(images_src, images_dest)
+        images_count = sum(1 for f in images_dest.iterdir() if f.is_file())
+
+    extra = f" + {images_count} imagens" if images_count else ""
+    print(f"[backup] 📁 Workspace '{workspace_dir.name}': {copied} ficheiros{extra} → {dest}")
     return dest
 
 
