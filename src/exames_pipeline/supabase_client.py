@@ -317,7 +317,7 @@ def _upsert_synthetic_contexto(
     notas_agregadas: list[dict] = []
     for st in stems:
         cabecalho = f"**[{st.id_item}]**\n\n" if st.id_item else ""
-        textos.append(cabecalho + (st.enunciado or ""))
+        textos.append(cabecalho + _strip_image_markdown(st.enunciado or ""))
         imagens_agregadas.extend(_build_imagens_jsonb(st, url_map))
         notas_agregadas.extend(_extract_notas_rodape(st.observacoes))
     texto_agregado = "\n\n---\n\n".join(textos)
@@ -359,7 +359,7 @@ def _upsert_contexto(
         {**headers, "Prefer": "return=representation,resolution=merge-duplicates"},
         {
             "fonte_id":         fonte_id,
-            "texto":            q.enunciado or "",
+            "texto":            _strip_image_markdown(q.enunciado or ""),
             "imagens":          imagens_json,
             "grupo":            q.grupo or "",
             "id_item_original": q.id_item,
@@ -372,14 +372,71 @@ def _upsert_contexto(
 
 # ── Imagens ───────────────────────────────────────────────────────────────────
 
+# Path de imagem dentro de markdown ``![](...)`` — um único grupo de captura.
+_IMG_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+
+
+def _enunciado_image_refs(enunciado: str | None) -> list[str]:
+    """Paths referenciados inline no enunciado via markdown ``![](...)``."""
+    return _IMG_REF_RE.findall(enunciado or "")
+
+
+def _question_image_refs(q: Question) -> list[str]:
+    """Conjunto canónico de imagens de uma questão.
+
+    União das imagens referenciadas inline no enunciado (ordem de leitura) com
+    as de ``q.imagens``, deduplicado por basename. O enunciado é a fonte de
+    verdade — a regra do projeto exige toda figura inline como ``![](...)`` —
+    mas ``q.imagens`` pode estar dessincronizado. Unir os dois garante que
+    nenhuma figura escape ao upload nem ao jsonb (bug das 62 figuras ausentes).
+    """
+    refs: list[str] = []
+    seen: set[str] = set()
+    for ref in _enunciado_image_refs(q.enunciado) + list(q.imagens or []):
+        key = ref if ref.startswith(("http://", "https://")) else Path(ref).name
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(ref)
+    return refs
+
+
+def _resolve_local_image(base_dir: Path, ref: str) -> Path | None:
+    """Localiza o ficheiro de uma referência, tolerando prefixos divergentes.
+
+    O enunciado usa ``images/HASH.jpg`` e ``q.imagens`` usa
+    ``imagens_extraidas/HASH.jpg`` — o mesmo ficheiro. Tenta o path tal como
+    vem e, em falha, procura o basename nas pastas de imagens conhecidas.
+    """
+    cand = base_dir / ref
+    if cand.exists():
+        return cand
+    name = Path(ref).name
+    for sub in ("images", "imagens_extraidas"):
+        alt = base_dir / sub / name
+        if alt.exists():
+            return alt
+    return None
+
+
 def _build_imagens_jsonb(q: Question, url_map: dict[str, str]) -> list[dict]:
-    """Converte a lista de imagens (URLs ou paths locais) em objectos jsonb com metadata."""
-    result = []
+    """Converte as imagens de uma questão em objectos jsonb ``{url, descricao, alt}``.
+
+    Usa ``_question_image_refs`` — todas as figuras referenciadas, inclusive as
+    que só constam inline no enunciado. O frontend renderiza as figuras a
+    partir deste jsonb (não do markdown, removido no upload). Dedup por URL.
+    """
+    result: list[dict] = []
+    seen: set[str] = set()
     desc_map = q.descricoes_imagens or {}
-    for img_ref in (q.imagens or []):
+    for img_ref in _question_image_refs(q):
         url = url_map.get(img_ref, img_ref)
-        # Tentar encontrar descrição por path local ou por URL
-        descricao = desc_map.get(img_ref) or desc_map.get(url) or ""
+        if url in seen:
+            continue
+        seen.add(url)
+        # Descrição: tentar por path local, por basename ou por URL
+        descricao = (desc_map.get(img_ref) or desc_map.get(Path(img_ref).name)
+                     or desc_map.get(url) or "")
         alt = Path(img_ref).stem if not img_ref.startswith("http") else url.split("/")[-1].split(".")[0]
         result.append({"url": url, "descricao": descricao, "alt": alt})
     return result
@@ -391,36 +448,73 @@ def _upload_images(
     base_dir: Path,
     headers: dict[str, str],
     dry_run: bool = False,
-) -> dict[str, str]:
-    """Faz upload de todas as imagens e retorna mapa path_local → URL_pública."""
+) -> tuple[dict[str, str], list[str]]:
+    """Faz upload das imagens das questões.
+
+    Retorna ``(url_map, missing)``: ``url_map`` mapeia ref_local → URL pública;
+    ``missing`` lista referências do enunciado / ``q.imagens`` sem ficheiro
+    local — figuras que se perderiam (o markdown é removido no upload). O
+    chamador bloqueia o upload se ``missing`` não estiver vazia.
+    """
     uploaded: dict[str, str] = {}
-    all_refs: set[str] = set()
+    missing: set[str] = set()
+
+    # Conjunto canónico (enunciado ∪ q.imagens) — estas figuras pertencem à
+    # questão; se faltarem, o upload bloqueia.
+    canonical: set[str] = set()
     for q in questions:
-        all_refs.update(q.imagens or [])
-        all_refs.update(q.imagens_contexto or [])
+        canonical.update(_question_image_refs(q))
+    # imagens_contexto são herdadas do stem pai (que as carrega via as suas
+    # próprias refs canónicas) — enviar se existirem, sem rastrear como missing.
+    extra: set[str] = set()
+    for q in questions:
+        extra.update(q.imagens_contexto or [])
+    extra -= canonical
 
-    for ref in sorted(all_refs):
-        if ref.startswith("http://") or ref.startswith("https://"):
-            continue
-        local = (base_dir / ref).resolve()
-        if not local.exists():
-            continue
-
+    def _send(ref: str, track: bool) -> None:
+        if ref.startswith(("http://", "https://")):
+            return
+        local = _resolve_local_image(base_dir, ref)
+        if local is None:
+            if track:
+                missing.add(ref)
+            return
         object_name = f"{base_dir.name}/{local.name}"
         encoded     = urllib.parse.quote(object_name, safe="/")
         public_url  = (f"{settings.supabase_url}/storage/v1/object/public/"
                        f"{settings.supabase_bucket}/{encoded}")
-
-        if dry_run:
-            uploaded[ref] = public_url
-            continue
-
-        upload_url = (f"{settings.supabase_url}/storage/v1/object/"
-                      f"{settings.supabase_bucket}/{encoded}")
-        _upload_binary(upload_url, headers, local)
+        if not dry_run:
+            upload_url = (f"{settings.supabase_url}/storage/v1/object/"
+                          f"{settings.supabase_bucket}/{encoded}")
+            _upload_binary(upload_url, headers, local)
         uploaded[ref] = public_url
 
-    return uploaded
+    for ref in sorted(canonical):
+        _send(ref, track=True)
+    for ref in sorted(extra):
+        _send(ref, track=False)
+
+    return uploaded, sorted(missing)
+
+
+# ── Remoção de imagens inline no texto ────────────────────────────────────────
+
+_IMAGE_MD_RE = re.compile(r"(!\[[^\]]*\]\()([^)]+)(\))")
+
+
+def _strip_image_markdown(text: str) -> str:
+    """Remove marcações de imagem markdown (``![](...)``) do texto.
+
+    O frontend do Supabase renderiza LaTeX e o campo ``imagens`` (jsonb), mas
+    não markdown — um ``![](...)`` no texto apareceria como texto literal. As
+    figuras são servidas pelo jsonb; aqui só se limpa o texto.
+    """
+    if not text:
+        return text
+    text = _IMAGE_MD_RE.sub("", text)
+    # Colapsar linhas em branco deixadas pela remoção
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 # ── Conversão Question → row DB ───────────────────────────────────────────────
@@ -445,7 +539,7 @@ def _question_to_row(
         "subitem":         q.subitem,
         # Conteúdo
         "tipo_item":   q.tipo_item,
-        "enunciado":   q.enunciado or "",
+        "enunciado":   _strip_image_markdown(q.enunciado or ""),
         "alternativas": [
             {"letra": a.letra, "texto": a.texto}
             for a in (q.alternativas or [])
@@ -620,14 +714,31 @@ def upload_to_supabase(
 
     # ── 1. Upload de imagens ──────────────────────────────────────────────────
     print(f"[upload] {'[DRY-RUN] ' if dry_run else ''}A enviar imagens…")
+    missing_images: list[str] = []
     try:
-        url_map = _upload_images(settings, questions, base_dir, headers, dry_run=dry_run)
+        url_map, missing_images = _upload_images(
+            settings, questions, base_dir, headers, dry_run=dry_run)
         summary.uploaded_images = url_map
         print(f"[upload] ✅ {len(url_map)} imagens {'mapeadas' if dry_run else 'enviadas'}.")
     except SupabaseError as exc:
         summary.errors.append(f"Erro imagens: {exc}")
         url_map = {}
         print(f"[upload] ❌ {exc}")
+
+    # Gate: figura referenciada no enunciado mas sem ficheiro local seria
+    # silenciosamente perdida (o markdown ![](...) é removido no upload).
+    # Bloquear — assim o problema das 62 figuras ausentes não se repete.
+    if missing_images:
+        amostra = ", ".join(missing_images[:10]) + (" …" if len(missing_images) > 10 else "")
+        msg = (
+            f"Upload bloqueado: {len(missing_images)} imagem(ns) referenciada(s) "
+            f"sem ficheiro local: {amostra}. Coloque o ficheiro em images/ ou "
+            "imagens_extraidas/ do workspace, ou remova a referência ![](...) "
+            "do enunciado."
+        )
+        print(f"[upload] ❌ {msg}")
+        summary.errors.append(msg)
+        return summary
 
     # ── 2. Resolver matéria e fonte ───────────────────────────────────────────
     # Todas as questões de um ficheiro partilham a mesma fonte (já validada acima)
