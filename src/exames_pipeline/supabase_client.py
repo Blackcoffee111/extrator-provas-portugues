@@ -419,6 +419,32 @@ def _resolve_local_image(base_dir: Path, ref: str) -> Path | None:
     return None
 
 
+# Markdown de imagem: captura prefixo `![alt](`, o caminho, e o `)` final.
+_IMG_MD_RE = re.compile(r"(!\[[^\]]*\]\()([^)]+)(\))")
+
+
+def _extract_image_refs(text: str) -> list[str]:
+    """Devolve os caminhos locais referenciados em markdown de imagem (ignora URLs)."""
+    refs = []
+    for m in _IMG_MD_RE.finditer(text or ""):
+        path = m.group(2).strip()
+        if not path.startswith(("http://", "https://")):
+            refs.append(path)
+    return refs
+
+
+def _rewrite_image_refs(text: str, url_map: dict[str, str]) -> str:
+    """Reescreve caminhos locais de markdown de imagem para as URLs públicas."""
+    if not text:
+        return text
+
+    def repl(m: re.Match) -> str:
+        path = m.group(2).strip()
+        return f"{m.group(1)}{url_map.get(path, path)}{m.group(3)}"
+
+    return _IMG_MD_RE.sub(repl, text)
+
+
 def _build_imagens_jsonb(q: Question, url_map: dict[str, str]) -> list[dict]:
     """Converte as imagens de uma questão em objectos jsonb ``{url, descricao, alt}``.
 
@@ -464,6 +490,12 @@ def _upload_images(
     canonical: set[str] = set()
     for q in questions:
         canonical.update(_question_image_refs(q))
+        # Imagens referenciadas em markdown dentro das alternativas (escolha
+        # múltipla cujas opções são imagens) também pertencem à questão — entram
+        # no conjunto canónico para serem enviadas ao Storage e bloquearem o
+        # upload se o ficheiro local faltar.
+        for a in (q.alternativas or []):
+            canonical.update(_extract_image_refs(a.texto or ""))
     # imagens_contexto são herdadas do stem pai (que as carrega via as suas
     # próprias refs canónicas) — enviar se existirem, sem rastrear como missing.
     extra: set[str] = set()
@@ -541,7 +573,7 @@ def _question_to_row(
         "tipo_item":   q.tipo_item,
         "enunciado":   _strip_image_markdown(q.enunciado or ""),
         "alternativas": [
-            {"letra": a.letra, "texto": a.texto}
+            {"letra": a.letra, "texto": _rewrite_image_refs(a.texto, url_map)}
             for a in (q.alternativas or [])
         ],
         "imagens": _build_imagens_jsonb(q, url_map),
